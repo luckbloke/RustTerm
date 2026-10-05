@@ -23,6 +23,17 @@ russh-sftp = "2"
 tokio = { version = "1", features = ["full", "process"] }
 anyhow = "1"
 keyring = "4.2.0"
+# VNC 客户端（纯 Rust）
+vnc-rs = "0.5"
+
+# RDP 客户端（纯 Rust）
+ironrdp = { version = "0.11", features = ["client", "graphics"] }
+ironrdp-tokio = "0.11"
+ironrdp-session = "0.11"
+ironrdp-graphics = "0.11"
+
+# 图像编码（用于压缩帧数据）
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [profile.release]
 opt-level = 3
