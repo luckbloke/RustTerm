@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力",
+  "windows": ["main", "tab-*"],
+  "permissions": [
+    "core:default",
+    "core:menu:default",
+    "core:event:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-close",
+    "shell:allow-execute",
+    "shell:allow-spawn",
+    "shell:allow-stdin-write",
+    "shell:allow-kill",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "dialog:allow-confirm"
+  ]
+}

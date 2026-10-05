@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RustTerm</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <!-- 工具栏：文案全部由 data-i18n / data-i18n-title 提供，HTML 里不写死语言 -->
+  <div id="toolbar" role="toolbar">
+    <button class="tool-btn" data-action="new-local" data-i18n-title="tipSessions">
+      <span class="icon" aria-hidden="true">▣</span><span data-i18n="toolbarSessions"></span>
+    </button>
+    <button class="tool-btn" data-action="new-ssh" data-i18n-title="tipSessionsLib">
+      <span class="icon" aria-hidden="true">☰</span><span data-i18n="toolbarSessionsLib"></span>
+    </button>
+    <button class="tool-btn" data-action="split" data-i18n-title="tipSplit">
+      <span class="icon" aria-hidden="true">▥</span><span data-i18n="toolbarSplit"></span>
+    </button>
+    <button class="tool-btn" data-action="multiexec" data-i18n-title="tipMultiExec">
+      <span class="icon" aria-hidden="true">⇉</span><span data-i18n="toolbarMultiExec"></span>
+    </button>
+    <button class="tool-btn" data-action="batch" data-i18n-title="tipBatch">
+      <span class="icon" aria-hidden="true">⌘</span><span data-i18n="toolbarBatch"></span>
+    </button>
+    <button class="tool-btn" data-action="tunneling" data-i18n-title="tipTunneling">
+      <span class="icon" aria-hidden="true">⇄</span><span data-i18n="toolbarTunneling"></span>
+    </button>
+    <button class="tool-btn" data-action="telnet" data-i18n-title="telnetTitle">
+      <span class="icon" aria-hidden="true">⌨</span><span data-i18n="telnetTitle"></span>
+    </button>
+    <button class="tool-btn" data-action="ping" data-i18n-title="pingTitle">
+      <span class="icon" aria-hidden="true">⇆</span><span data-i18n="pingTitle"></span>
+    </button>
+    <button class="tool-btn" data-action="find" data-i18n-title="findPlaceholder">
+      <span class="icon" aria-hidden="true">🔍</span><span data-i18n="findPlaceholder"></span>
+    </button>
+    <button class="tool-btn" data-action="settings" data-i18n-title="tipSettings">
+      <span class="icon" aria-hidden="true">⚙</span><span data-i18n="toolbarSettings"></span>
+    </button>
+    <button class="tool-btn" data-action="lang" data-i18n-title="tipLang">
+      <span class="icon" aria-hidden="true">🌐</span><span data-i18n="toolbarLang"></span>
+    </button>
+    <button class="tool-btn" data-action="theme" data-i18n-title="tipTheme">
+      <span class="icon" aria-hidden="true">◐</span><span data-i18n="toolbarTheme"></span>
+    </button>
+    <button class="tool-btn" data-action="help" data-i18n-title="tipHelp">
+      <span class="icon" aria-hidden="true">?</span><span data-i18n="toolbarHelp"></span>
+    </button>
+    <div class="toolbar-spacer"></div>
+    <button class="tool-btn" data-action="xserver" data-i18n-title="tipXServer">
+      <span class="icon" aria-hidden="true">⊞</span><span data-i18n="toolbarXServer"></span>
+    </button>
+    <button class="tool-btn" data-action="exit" data-i18n-title="tipExit">
+      <span class="icon" aria-hidden="true">⏻</span><span data-i18n="toolbarExit"></span>
+    </button>
+  </div>
+
+  <!-- 快速连接 -->
+  <div id="quick-connect">
+    <input id="quick-input" data-i18n-placeholder="quickPlaceholder" spellcheck="false" autocomplete="off" />
+    <input id="jump-input" data-i18n-placeholder="jumpPlaceholder" spellcheck="false" autocomplete="off" />
+    <select id="auth-method" data-i18n-title="authMethodTitle">
+      <option value="password" data-i18n="authPassword"></option>
+      <option value="key" data-i18n="authKey"></option>
+    </select>
+    <button id="btn-connect" data-i18n="quickConnectConnect"></button>
+  </div>
+
+  <div id="main">
+    <!-- 侧栏 -->
+    <div id="sidebar">
+      <div class="sidebar-tabs" role="tablist">
+        <button class="sidebar-tab active" data-panel="sessions" data-i18n="sidebarSessions"></button>
+        <button class="sidebar-tab" data-panel="tools" data-i18n="sidebarTools"></button>
+        <button class="sidebar-tab" data-panel="macros" data-i18n="sidebarMacros"></button>
+      </div>
+      <div id="sessions-panel" class="sidebar-panel">
+        <div class="tree"></div>
+      </div>
+      <div id="tools-panel" class="sidebar-panel hidden">
+        <div class="tree">
+          <div class="tree-item" data-tool="ssh" data-i18n="treeSSH"></div>
+          <div class="tree-item" data-tool="sftp" data-i18n="treeSFTP"></div>
+          <div class="tree-item" data-tool="telnet" data-i18n="treeTelnet"></div>
+          <div class="tree-item" data-tool="rdp" data-i18n="treeRDP"></div>
+          <div class="tree-item" data-tool="vnc" data-i18n="treeVNC"></div>
+        </div>
+      </div>
+      <div id="macros-panel" class="sidebar-panel hidden">
+        <div class="tree"><div class="tree-item empty" data-i18n="treeNoMacros"></div></div>
+      </div>
+    </div>
+
+    <!-- 终端区：每个标签页持有独立的 xterm 实例和窗格 -->
+    <div id="content">
+      <div id="tabs" role="tablist"></div>
+      <div id="terminal-wrap">
+        <div id="terminal-panes"></div>
+
+        <div id="welcome">
+          <div class="welcome-logo" data-i18n="welcomeLogo"></div>
+          <div class="welcome-buttons">
+            <button id="welcome-local" data-i18n="welcomeLocal"></button>
+            <button id="welcome-recover" data-i18n="welcomeRecover"></button>
+          </div>
+          <div class="welcome-search">
+            <input id="welcome-search" data-i18n-placeholder="welcomeSearchPlaceholder" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="welcome-recent">
+            <div class="recent-title" data-i18n="welcomeRecent"></div>
+            <div class="recent-grid"></div>
+            <div class="recent-empty hidden" id="welcome-empty"></div>
+          </div>
+        </div>
+
+        <div id="find-bar" class="hidden">
+          <input id="find-input" data-i18n-placeholder="findPlaceholder" spellcheck="false" autocomplete="off" />
+          <button id="find-prev" data-i18n="findPrev"></button>
+          <button id="find-next" data-i18n="findNext"></button>
+          <button id="find-close" title="Esc">×</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SFTP -->
+    <div id="sftp-panel" class="hidden">
+      <div class="sftp-header">
+        <strong data-i18n="sftpTitle"></strong>
+        <button id="sftp-up" class="icon-btn" data-i18n-title="sftpUp">
+          <span aria-hidden="true">↑</span>
+        </button>
+        <button id="sftp-refresh" class="icon-btn" data-i18n-title="sftpRefresh">
+          <span aria-hidden="true">⟳</span>
+        </button>
+        <button id="sftp-upload" class="icon-btn" data-i18n-title="sftpUpload">
+          <span aria-hidden="true">⇧</span>
+        </button>
+        <button id="sftp-mkdir" class="icon-btn" data-i18n-title="sftpMkdir">
+          <span aria-hidden="true">＋</span>
+        </button>
+      </div>
+      <div id="sftp-path">
+        <input id="sftp-path-input" data-i18n-placeholder="sftpPathPlaceholder" spellcheck="false" autocomplete="off" />
+      </div>
+      <div class="sftp-options">
+        <label class="inline-check">
+          <input type="checkbox" id="sftp-show-hidden" />
+          <span data-i18n="sftpShowHidden"></span>
+        </label>
+        <span id="sftp-hidden-count" class="dim"></span>
+      </div>
+      <ul id="sftp-list"></ul>
+      <div id="sftp-progress" class="hidden">
+        <div id="sftp-progress-label"></div>
+        <div class="progress-bar"><div id="sftp-progress-fill"></div></div>
+        <button id="sftp-cancel" class="icon-btn" data-i18n-title="sftpCancel">
+          <span aria-hidden="true">✕</span>
+        </button>
+      </div>
+      <div id="transfer-queue"></div>
+      <div id="sftp-status"></div>
+    </div>
+  </div>
+
+  <div id="statusbar">
+    <span id="status" data-i18n="statusReady"></span>
+    <span id="status-pos"></span>
+  </div>
+
+<!-- 端口扫描 -->
+<div id="scan-modal" class="modal hidden">
+  <div class="modal-content" style="max-width: 640px;">
+    <h2 data-i18n="scanTitle"></h2>
+    <label><span data-i18n="scanTargets"></span>
+      <input id="scan-targets" placeholder="192.168.1.1-192.168.1.254  或  192.168.1.0/24" />
+    </label>
+    <label><span data-i18n="scanPorts"></span>
+      <input id="scan-ports" placeholder="22,80,443,8000-8100" />
+    </label>
+    <label><span data-i18n="scanConcurrency"></span>
+      <input id="scan-concurrency" type="number" value="256" min="1" max="1024" />
+    </label>
+    <label><span data-i18n="scanTimeout"></span>
+      <input id="scan-timeout" type="number" value="800" min="100" max="5000" />
+    </label>
+    <div class="progress-bar" style="margin-top:8px;">
+      <div id="scan-progress-fill" style="height:100%; width:0%; background:var(--accent);"></div>
+    </div>
+    <div id="scan-status" style="font-size:12px; color:var(--text-dim); margin-top:4px;"></div>
+    <ul id="scan-results" style="list-style:none; padding:0; max-height:240px; overflow-y:auto; border:1px solid var(--border); margin-top:8px; background:var(--bg);"></ul>
+    <div class="modal-actions">
+      <button id="scan-run" data-i18n="scanRun"></button>
+      <button id="scan-stop" data-i18n="scanStop"></button>
+      <button id="scan-close" data-i18n="commonClose"></button>
+    </div>
+  </div>
+</div>
+
+  <!-- 设置 -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="settingsTitle"></h2>
+      <label><span data-i18n="settingsFontSize"></span><input id="set-fontsize" type="number" value="14" min="8" max="32" /></label>
+      <label><span data-i18n="settingsCursorBlink"></span><input id="set-cursor" type="checkbox" checked /></label>
+      <label><span data-i18n="settingsScrollback"></span><input id="set-scrollback" type="number" value="5000" min="100" /></label>
+      <label><span data-i18n="termMultiExecRow"></span><input id="set-multiexec" type="checkbox" /></label>
+      <label class="stacked">
+        <span data-i18n="settingsHostKey"></span>
+        <select id="set-hostkey">
+          <option value="strict" data-i18n="hostKeyStrict"></option>
+          <option value="accept-new" data-i18n="hostKeyAcceptNew"></option>
+          <option value="insecure" data-i18n="hostKeyInsecure"></option>
+        </select>
+      </label>
+      <p class="hint" id="hostkey-hint"></p>
+      <div class="modal-actions">
+        <button id="set-cancel" data-i18n="commonCancel"></button>
+        <button id="set-ok" class="primary" data-i18n="settingsSave"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 关于 -->
+  <div id="about-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="aboutTitle"></h2>
+      <p id="about-version"></p>
+      <p data-i18n="aboutDesc"></p>
+      <p class="dim" data-i18n="aboutBuilt"></p>
+      <p class="dim" data-i18n="aboutShortcuts"></p>
+      <p class="dim" data-i18n="aboutLicense"></p>
+      <div class="modal-actions"><button id="about-ok" class="primary" data-i18n="commonConfirm"></button></div>
+    </div>
+  </div>
+
+  <!-- 宏回放 -->
+  <div id="macro-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="macroTitle"></h2>
+      <ul id="macro-list"></ul>
+      <div class="modal-actions"><button id="macro-cancel" data-i18n="commonCancel"></button></div>
+    </div>
+  </div>
+
+  <!-- 端口转发 -->
+  <div id="tunnel-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="tunnelTitle"></h2>
+      <ul id="tunnel-list"></ul>
+      <div class="modal-actions">
+        <button id="tunnel-add" data-i18n="tunnelAdd"></button>
+        <button id="tunnel-close" class="primary" data-i18n="tunnelClose"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量命令 -->
+  <div id="batch-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="batchTitle"></h2>
+      <p class="hint" data-i18n="batchBody"></p>
+      <ul id="batch-tabs"></ul>
+      <textarea id="batch-cmd" rows="3" data-i18n-placeholder="batchPlaceholder"></textarea>
+      <div class="modal-actions">
+        <button id="batch-run" class="primary" data-i18n="batchRun"></button>
+        <button id="batch-cancel" data-i18n="commonCancel"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用输入 / 确认 / 提示 -->
+  <div id="prompt-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 id="prompt-title"></h2>
+      <p id="prompt-message"></p>
+      <input id="prompt-input" spellcheck="false" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="prompt-cancel" data-i18n="commonCancel"></button>
+        <button id="prompt-ok" class="primary" data-i18n="commonConfirm"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-message"></p>
+      <div class="modal-actions">
+        <button id="confirm-cancel" data-i18n="commonCancel"></button>
+        <button id="confirm-ok" class="primary" data-i18n="commonConfirm"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="alert-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 id="alert-title"></h2>
+      <p id="alert-message"></p>
+      <div class="modal-actions"><button id="alert-ok" class="primary" data-i18n="commonConfirm"></button></div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

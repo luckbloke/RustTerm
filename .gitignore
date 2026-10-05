@@ -1,0 +1,67 @@
+# ==========================================================================
+# RustTerm .gitignore
+#
+# 注意：仓库根目录下的 vcxsrv-*.installer.exe（约 41 MB）是**有意提交**的，
+# 它是离线部署用的可选组件安装包，README 中已说明，故不在此忽略。
+# 若你不需要离线分发包，可自行加上忽略规则并把它从版本库移除。
+# ==========================================================================
+
+# ---------- 依赖 ----------
+node_modules/
+
+# ---------- 构建产物 ----------
+dist/
+src-tauri/target/
+
+# tauri-build 生成的权限清单与 schema，每次编译都会重建
+src-tauri/gen/schemas/
+
+# 前端编译残留：tsconfig 已开 noEmit，若误开了会在这里兜住
+src/**/*.js
+src/**/*.js.map
+
+# ---------- 日志 ----------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- 测试与覆盖率 ----------
+coverage/
+*.lcov
+.nyc_output/
+
+# ---------- 编辑器与操作系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------- 环境与密钥：绝不要提交 ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+known_hosts
+
+# ---------- 打包产物（若把 dist 外的产物放在根目录）----------
+*.msi
+*.app
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+
+# ---------- 本地临时目录 ----------
+.tmp/
+tmp/
+.cache/
