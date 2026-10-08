@@ -12,6 +12,10 @@ import {
   applyI18n, errorText, loadLang, makeT, saveLang, type Lang, type T,
 } from './i18n';
 import '@xterm/xterm/css/xterm.css';
+import { connectRemote, closeRemote, setupRemoteListeners } from './remote-desktop';
+
+// 注册 VNC/RDP 事件监听（全局一次）
+setupRemoteListeners();
 
 /* ==========================================================================
    1. 主题与语言
@@ -96,6 +100,8 @@ interface Tab {
   closed: boolean;
   /** 后端会话已结束（shell 退出/连接断开），但标签还留着供查看输出 */
   disconnected: boolean;
+  /** 远程桌面会话（VNC/RDP/SPICE）：term 是空壳，内容由 canvas 渲染 */
+  remote?: { sessionId: string; type: 'vnc' | 'rdp' | 'spice' } | null;
 }
 
 interface TransferJob {
@@ -116,6 +122,8 @@ interface SavedSession {
   color: string;
   /** 密码是否已存入系统凭据库（密码本身不在 sessions.json 里） */
   save_password: boolean;
+  /** 'ssh' | 'vnc' | 'rdp' | 'spice'，旧存档缺省按 'ssh' 处理 */
+  protocol?: string;
 }
 
 interface RemoteEntry {
@@ -126,6 +134,12 @@ interface RemoteEntry {
   /** 隐藏项（以 . 开头或远端标记为隐藏）；是否显示由界面开关决定 */
   hidden: boolean;
 }
+
+/**
+ * 远程桌面标签（VNC/RDP）的原始连接信息。
+ * tab.title 只反映 host，port 和 protocol 会丢，保存会话时需要这份记录。
+ */
+ const remoteTabInfo = new Map<number, { host: string; port: number; protocol: 'vnc' | 'rdp' | 'spice' }>();
 
 let tabs: Tab[] = [];
 let activeTab = 0;
@@ -341,6 +355,13 @@ function renderTabs(): void {
     title.textContent = tab.title;
     el.appendChild(title);
 
+    if (tab.remote) {
+      const badge = document.createElement('span');
+      badge.className = 'tab-badge';
+      badge.textContent = tab.remote.type.toUpperCase();
+      el.appendChild(badge);
+    }
+
     if (tab.syncGroup > 0) {
       const badge = document.createElement('span');
       badge.className = 'tab-badge';
@@ -483,6 +504,44 @@ function attachKeyHandler(term: Terminal): void {
   });
 }
 
+/**
+ * 创建一个"远程桌面"标签。
+ *
+ * 和普通终端标签的区别：
+ * - 不创建 xterm / FitAddon，因为 VNC/RDP 用 canvas 渲染
+ * - wrapper 里放一个 canvas，由 connectRemote 填充
+ * - term 用一个空壳 xterm 占位，避免改动所有用到 tab.term 的代码路径
+ *   （实际上不会 open、不会 write、不会 dispose 时出问题）
+ */
+function createRemoteTab(sessionId: string, title: string, type: 'vnc' | 'rdp' | 'spice'): Tab {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'term-pane';
+  panesEl.appendChild(wrapper);
+
+  // 空壳终端：不 open，不 loadAddon，不接事件。仅用于类型占位。
+  const term = new Terminal({ cursorBlink: false });
+  const fit = new FitAddon();
+  // 不调用 term.open()，所以这个 term 不会渲染任何东西。
+  // 所有对 tab.term 的调用都需要在下游做守卫（见下面的 fitTab / sendInput 等）。
+
+  const tab: Tab = {
+    id: nextId++, title, sessionId, isSsh: false,
+    sftpPath: '.', sftpRequest: 0, syncGroup: 0, color: '',
+    term, fit, wrapper, pane: wrapper, split: null, search: null,
+    disposables: [], closed: false, disconnected: false,
+    remote: { sessionId, type },
+  };
+
+  // 只挂 canvas 需要的输入处理。xterm 的事件一律不接。
+  tabs.push(tab);
+  activeTab = tabs.length - 1;
+  renderTabs();
+  hideWelcome();
+  setActivePanes();
+  saveOpenTabs();
+  return tab;
+}
+
 function createTab(sessionId: string, title: string, isSsh: boolean): Tab {
   // wrapper 负责在 #terminal-panes 中定位；pane 才是终端实际打开的元素。
   // 分成两层是为了分屏：若终端直接开在 wrapper 上，第二窗格的包含块
@@ -513,6 +572,7 @@ function createTab(sessionId: string, title: string, isSsh: boolean): Tab {
     sftpPath: '.', sftpRequest: 0, syncGroup: 0, color: '',
     term, fit, wrapper, pane, split: null, search: null, disposables: [], closed: false,
     disconnected: false,
+    remote: null,
   };
 
   attachTerminal(term, pane);
@@ -578,7 +638,17 @@ function closeTab(tab: Tab, keepPane = false): void {
     try { disposable.dispose(); } catch { /* 已释放 */ }
   }
 
-  void invoke('pty_close', { sessionId: tab.sessionId }).catch(() => {});
+  // 远程桌面标签：销毁 VNC/RDP 后端会话和 canvas
+  if (tab.remote) {
+    void closeRemote(tab.remote.sessionId, tab.remote.type).catch(() => {});
+  } else {
+    // 普通终端标签：关闭 PTY/SSH 会话
+    void invoke('pty_close', { sessionId: tab.sessionId }).catch(() => {});
+  }
+
+  // 清理远程桌面标签的元数据
+  remoteTabInfo.delete(tab.id);
+
   tab.term.dispose();
   tab.wrapper.remove();
   tabs.splice(index, 1);
@@ -642,6 +712,8 @@ function computeDims(tab: Tab): { cols: number; rows: number } {
 }
 
 function fitTab(tab: Tab): void {
+  // 远程桌面标签没有真实 xterm，跳过 fit
+  if (tab.remote) return;
   if (tab.wrapper.style.display === 'none' || tab.wrapper.offsetParent === null) return;
   try { tab.fit.fit(); } catch { /* 布局尚未稳定，下次再试 */ }
   if (tab.split) {
@@ -692,6 +764,7 @@ function sendInput(tab: Tab, data: string): void {
   // 已关闭或后端会话已结束：直接丢弃。
   // 否则每次按键都会打一次注定失败的 pty_write，而用户看不到任何反馈。
   if (tab.closed || tab.disconnected) return;
+  if (tab.remote) return;
   const bytes = encode(data);
   if (recording !== null) recording.push(...bytes);
   if (tab.syncGroup > 0) {
@@ -836,6 +909,8 @@ function destroySplit(tab: Tab): void {
 
 function findTabBySession(sessionId: string): { tab: Tab; split: boolean } | null {
   for (const tab of tabs) {
+    // 远程桌面会话有独立的 event 流（vnc:frame），不走 pty:data
+    if (tab.remote) continue;
     if (tab.sessionId === sessionId) return { tab, split: false };
     if (tab.split?.sessionId === sessionId) return { tab, split: true };
   }
@@ -845,6 +920,8 @@ function findTabBySession(sessionId: string): { tab: Tab; split: boolean } | nul
 void listen<{ sessionId: string; data: number[] }>('pty:data', (event) => {
   const found = findTabBySession(event.payload.sessionId);
   if (!found) return;
+  // 远程桌面标签不接收 pty 数据
+  if (found.tab.remote) return;
   const target = found.split && found.tab.split ? found.tab.split.term : found.tab.term;
   target.write(new Uint8Array(event.payload.data));
 });
@@ -1193,25 +1270,48 @@ async function showSessionManager(): Promise<void> {
       folder.textContent = `📁 ${group}`;
       tree.appendChild(folder);
       for (const session of items) {
+        const proto = session.protocol ?? 'ssh';
         const item = document.createElement('div');
         item.className = 'tree-item';
+        if (proto !== 'ssh') item.classList.add('remote-session');
+
+        // 协议徽标：[SSH] / [VNC] / [RDP]
+        const protoTag = proto === 'ssh'
+          ? ''
+          : `[${proto.toUpperCase()}] `;
+
         // 用 textContent 组装，会话名可能来自导入文件，不能当 HTML
         item.textContent = session.save_password
-          ? `${session.name}  · ${t('sessPasswordMark')}`
-          : session.name;
+          ? `${protoTag}${session.name}  · ${t('sessPasswordMark')}`
+          : `${protoTag}${session.name}`;
+
         if (session.color) item.style.color = session.color;
+
+        // 单击：填入快速连接框（仅 SSH 有意义）
         item.onclick = () => {
-          $<HTMLInputElement>('quick-input').value = `${session.user}@${session.host}:${session.port}`;
-          setStatus(t('sessionSelected', { name: session.name }));
+          if (proto === 'ssh') {
+            $<HTMLInputElement>('quick-input').value =
+              `${session.user}@${session.host}:${session.port}`;
+            setStatus(t('sessionSelected', { name: session.name }));
+          } else {
+            setStatus(t('sessionSelected', { name: session.name }));
+          }
         };
+
+        // 双击：连接
         item.ondblclick = () => void connectSaved(session);
+
+        // 右键：删除
         item.oncontextmenu = async (ev) => {
           ev.preventDefault();
           if (!await showConfirm('sessDeleteTitle', 'sessDeleteConfirm', { name: session.name })) return;
           // delete_session 会一并清除凭据库里的密码
-          await invoke('delete_session', { host: session.host, port: session.port, user: session.user }).catch(() => {});
+          await invoke('delete_session', {
+            host: session.host, port: session.port, user: session.user,
+          }).catch(() => {});
           await showSessionManager();
         };
+
         // 已存密码的会话额外提供"忘记密码"：只清凭据，保留会话配置
         if (session.save_password) {
           const forget = document.createElement('button');
@@ -1225,7 +1325,9 @@ async function showSessionManager(): Promise<void> {
             // 同步更新标记，否则界面会说"已存密码"但凭据已不在
             await invoke('save_session_full', {
               host: session.host, port: session.port, user: session.user,
-              group: session.group, color: session.color, savePassword: false, password: null,
+              group: session.group, color: session.color,
+              savePassword: false, password: null,
+              protocol: session.protocol ?? 'ssh',
             }).catch(() => {});
             setStatus(t('sessPasswordCleared'));
             await showSessionManager();
@@ -1259,6 +1361,66 @@ async function askPassword(user: string, host: string, port: number): Promise<st
 }
 
 async function connectSaved(session: SavedSession): Promise<void> {
+  const proto = session.protocol ?? 'ssh';
+
+  // ===== 远程桌面会话（VNC / RDP / SPICE） =====
+  if (proto === 'vnc' || proto === 'rdp' || proto === 'spice') {
+    const isVnc = proto === 'vnc';
+    const isSpice = proto === 'spice';
+    const isRdp = proto === 'rdp';
+
+    // 每种协议对应的文案 key
+    const dialogTitle = isVnc ? 'vncTitle' : isSpice ? 'spiceTitle' : 'rdpTitle';
+    const passwordKey = isVnc ? 'vncPasswordPrompt' : isSpice ? 'spicePasswordPrompt' : 'rdpPasswordPrompt';
+    const connectingKey = isVnc ? 'vncConnecting' : isSpice ? 'spiceConnecting' : 'rdpConnecting';
+    const connectedKey = isVnc ? 'vncConnected' : isSpice ? 'spiceConnected' : 'rdpConnected';
+    const failedKey = isVnc ? 'vncFailed' : isSpice ? 'spiceFailed' : 'rdpFailed';
+    const tabTitleKey = isVnc ? 'vncTabTitle' : isSpice ? 'spiceTabTitle' : 'rdpTabTitle';
+    const tabKind: 'vnc' | 'rdp' | 'spice' = isVnc ? 'vnc' : isSpice ? 'spice' : 'rdp';
+
+    // RDP 需要用户名，VNC / SPICE 不需要
+    let username = '';
+    if (isRdp) {
+      username = await showPrompt(dialogTitle, 'rdpUserPrompt') ?? '';
+      if (!username) return;
+    }
+
+    const password = await showPrompt(dialogTitle, passwordKey, '', true);
+    if (password === null) return;
+
+    setStatus(t(connectingKey, { host: session.host, port: session.port }));
+
+    // 先建一个空的远程桌面标签，拿它的 wrapper 作为 canvas 容器
+    const placeholder = createRemoteTab('', t(tabTitleKey, { host: session.host }), tabKind);
+    remoteTabInfo.set(placeholder.id, {
+      host: session.host, port: session.port, protocol: tabKind,
+    });
+
+    try {
+      const sessionId = await connectRemote(
+        tabKind, session.host, session.port, username, password, placeholder.wrapper,
+      );
+      placeholder.sessionId = sessionId;
+      placeholder.remote = { sessionId, type: tabKind };
+
+      // 如果 connectRemote 期间用户已经关掉了这个标签，立即清理后端会话
+      if (placeholder.closed) {
+        await closeRemote(sessionId, tabKind);
+        return;
+      }
+
+      setStatus(t(connectedKey, { host: session.host }));
+    } catch (e) {
+      closeTab(placeholder, true);
+      renderTabs();
+      setActivePanes();
+      if (tabs.length === 0) showWelcome();
+      setStatus(t(failedKey, { err: errText(e) }));
+    }
+    return;
+  }
+
+  // ===== SSH 会话（原有逻辑） =====
   const password = await askPassword(session.user, session.host, session.port);
   if (password === null) return;
   await new Promise((r) => setTimeout(r, 0));
@@ -1474,13 +1636,15 @@ async function toggleFullscreen(): Promise<void> {
 }
 
 async function startXServer(): Promise<void> {
+  let display: string;
   try {
-    await invoke('xserver_start');
+    // 后端等待 X 协议握手完成后才返回，此时 DISPLAY 必然可用。
+    display = await invoke<string>('xserver_start');
   } catch (e) {
     setStatus(t('x11StartFailed', { err: errText(e) }));
     return;
   }
-  setStatus(t('statusXserverStarted'));
+  setStatus(t('statusXserverStarted', { display }));
   const tab = currentTab();
   if (tab?.isSsh && await showConfirm('x11Title', 'x11SetDisplay')) {
     try {
@@ -1578,6 +1742,84 @@ function openSettings(): void {
   $<HTMLSelectElement>('set-hostkey').value = hostKeyPolicy;
   void renderHostKeyHint();
   $('settings-modal').classList.remove('hidden');
+}
+
+interface XServerConfigEntry {
+  program: string;
+  args: string[];
+}
+
+/** 打开 X server 配置对话框。 */
+async function openXServerConfig(): Promise<void> {
+  try {
+    const config = await invoke<XServerConfigEntry[]>('xserver_get_config');
+    renderXServerList(config);
+    $('xserver-modal').classList.remove('hidden');
+  } catch (e) {
+    setStatus(t('errUnknown', { err: errText(e) }));
+  }
+}
+
+/** 渲染配置列表。 */
+function renderXServerList(list: XServerConfigEntry[]): void {
+  const container = $('xserver-list');
+  container.textContent = '';
+  for (const entry of list) {
+    container.appendChild(makeXServerRow(entry.program, entry.args.join(' ')));
+  }
+}
+
+/** 生成一行配置。 */
+function makeXServerRow(program: string, args: string): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'xserver-row';
+
+  const programInput = document.createElement('input');
+  programInput.type = 'text';
+  programInput.className = 'xserver-program';
+  programInput.placeholder = t('xserverProgram');
+  programInput.value = program;
+
+  const argsInput = document.createElement('input');
+  argsInput.type = 'text';
+  argsInput.className = 'xserver-args';
+  argsInput.placeholder = t('xserverArgs');
+  argsInput.value = args;
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'remove-btn';
+  removeBtn.textContent = '×';
+  removeBtn.title = t('xserverRemove');
+  removeBtn.onclick = () => row.remove();
+
+  row.append(programInput, argsInput, removeBtn);
+  return row;
+}
+
+/** 从 UI 读取配置列表。 */
+function collectXServerConfig(): XServerConfigEntry[] {
+  const rows = document.querySelectorAll<HTMLElement>('#xserver-list .xserver-row');
+  const list: XServerConfigEntry[] = [];
+  rows.forEach((row) => {
+    const program = row.querySelector<HTMLInputElement>('.xserver-program')?.value.trim() ?? '';
+    const argsStr = row.querySelector<HTMLInputElement>('.xserver-args')?.value.trim() ?? '';
+    if (!program) return;
+    const args = argsStr ? argsStr.split(/\s+/).filter(Boolean) : [];
+    list.push({ program, args });
+  });
+  return list;
+}
+
+/** 保存 X server 配置。 */
+async function saveXServerConfig(): Promise<void> {
+  const list = collectXServerConfig();
+  try {
+    await invoke('xserver_save_config', { list });
+    $('xserver-modal').classList.add('hidden');
+    setStatus(t('xserverSaved'));
+  } catch (e) {
+    setStatus(t('errUnknown', { err: errText(e) }));
+  }
 }
 
 /** 说明当前策略的含义，并显示实际使用的 known_hosts 路径。 */
@@ -1874,6 +2116,13 @@ $('set-ok').onclick = saveSettings;
 $('about-ok').onclick = () => $('about-modal').classList.add('hidden');
 $('macro-cancel').onclick = () => $('macro-modal').classList.add('hidden');
 $('tunnel-close').onclick = () => $('tunnel-modal').classList.add('hidden');
+$('xserver-add').onclick = () => {
+  const container = $('xserver-list');
+  container.appendChild(makeXServerRow('', ''));
+};
+
+$('xserver-save').onclick = () => void saveXServerConfig();
+$('xserver-cancel').onclick = () => $('xserver-modal').classList.add('hidden');
 
 $('tunnel-add').onclick = async () => {
   const tab = currentTab();
@@ -1920,23 +2169,129 @@ async function runTool(tool: string): Promise<void> {
       else setStatus(t('statusNeedSsh'));
       break;
     case 'telnet': await openTelnet(); break;
-    case 'rdp':
-      if (await showConfirm('rdpTitle', 'rdpBody')) {
-        try {
-          await invoke('open_external', { program: 'mstsc' });
-          setStatus(t('rdpStarted'));
-        } catch (e) { setStatus(t('rdpFailed', { err: errText(e) })); }
-      }
-      break;
-    case 'vnc':
-      if (await showConfirm('vncTitle', 'vncBody')) {
-        try {
-          await invoke('open_external', { program: 'https://www.tightvnc.com/download.php' });
-          setStatus(t('vncOpened'));
-        } catch (e) { setStatus(t('vncFailed', { err: errText(e) })); }
-      }
-      break;
+    case 'rdp': await openRdpDialog(); break;
+    case 'vnc': await openVncDialog(); break;
+    case 'spice': await openSpiceDialog(); break;
     default: break;
+  }
+}
+
+/** 打开内置 RDP 连接对话框 */
+async function openRdpDialog(): Promise<void> {
+  const host = await showPrompt('rdpTitle', 'rdpHostPrompt');
+  if (!host) return;
+
+  const portStr = (await showPrompt('rdpTitle', 'rdpPortPrompt', '3389')) || '3389';
+  const port = parseInt(portStr, 10) || 3389;
+
+  const username = await showPrompt('rdpTitle', 'rdpUserPrompt');
+  if (!username) return;
+
+  const password = await showPrompt('rdpTitle', 'rdpPasswordPrompt', '', true);
+  if (password === null) return;
+
+  setStatus(t('rdpConnecting', { host, port }));
+
+  const placeholder = createRemoteTab('', t('rdpTabTitle', { host }), 'rdp');
+  remoteTabInfo.set(placeholder.id, { host, port, protocol: 'rdp' });
+
+  try {
+    const sessionId = await connectRemote(
+      'rdp', host, port, username, password, placeholder.wrapper,
+    );
+    placeholder.sessionId = sessionId;
+    placeholder.remote = { sessionId, type: 'rdp' };
+
+    if (placeholder.closed) {
+      await closeRemote(sessionId, 'rdp');
+      return;
+    }
+
+    setStatus(t('rdpConnected', { host }));
+  } catch (e) {
+    closeTab(placeholder, true);
+    renderTabs();
+    setActivePanes();
+    if (tabs.length === 0) showWelcome();
+    setStatus(t('rdpFailed', { err: errText(e) }));
+  }
+}
+
+/** 打开内置 VNC 连接对话框 */
+async function openVncDialog(): Promise<void> {
+  const host = await showPrompt('vncTitle', 'vncHostPrompt');
+  if (!host) return;
+
+  const portStr = (await showPrompt('vncTitle', 'vncPortPrompt', '5900')) || '5900';
+  const port = parseInt(portStr, 10) || 5900;
+
+  const password = await showPrompt('vncTitle', 'vncPasswordPrompt', '', true);
+  if (password === null) return;
+
+  setStatus(t('vncConnecting', { host, port }));
+
+  // 先建一个空的远程桌面标签，拿它的 wrapper 作为 canvas 容器
+  const placeholder = createRemoteTab('', t('vncTabTitle', { host }), 'vnc');
+  remoteTabInfo.set(placeholder.id, { host, port, protocol: 'vnc' });
+
+  try {
+    const sessionId = await connectRemote(
+      'vnc', host, port, '', password, placeholder.wrapper,
+    );
+    // 把真实 sessionId 写回 tab，并让 remote 字段指向它
+    placeholder.sessionId = sessionId;
+    placeholder.remote = { sessionId, type: 'vnc' };
+
+    // 如果 connectRemote 期间用户已经关掉了这个标签，立即清理后端会话
+    if (placeholder.closed) {
+      await closeRemote(sessionId, 'vnc');
+      return;
+    }
+
+    setStatus(t('vncConnected', { host }));
+  } catch (e) {
+    // 连接失败：销毁占位标签
+    closeTab(placeholder, true);
+    renderTabs();
+    setActivePanes();
+    if (tabs.length === 0) showWelcome();
+    setStatus(t('vncFailed', { err: errText(e) }));
+  }
+}
+
+async function openSpiceDialog(): Promise<void> {
+  const host = await showPrompt('spiceTitle', 'spiceHostPrompt');
+  if (!host) return;
+
+  const portStr = (await showPrompt('spiceTitle', 'spicePortPrompt', '5930')) || '5930';
+  const port = parseInt(portStr, 10) || 5930;
+
+  const password = await showPrompt('spiceTitle', 'spicePasswordPrompt', '', true);
+  if (password === null) return;
+
+  setStatus(t('spiceConnecting', { host, port }));
+
+  const placeholder = createRemoteTab('', t('spiceTabTitle', { host }), 'spice');
+  remoteTabInfo.set(placeholder.id, { host, port, protocol: 'spice' });
+
+  try {
+    const sessionId = await connectRemote(
+      'spice', host, port, '', password, placeholder.wrapper,
+    );
+    placeholder.sessionId = sessionId;
+    placeholder.remote = { sessionId, type: 'spice' };
+
+    if (placeholder.closed) {
+      await closeRemote(sessionId, 'spice');
+      return;
+    }
+    setStatus(t('spiceConnected', { host }));
+  } catch (e) {
+    closeTab(placeholder, true);
+    renderTabs();
+    setActivePanes();
+    if (tabs.length === 0) showWelcome();
+    setStatus(t('spiceFailed', { err: errText(e) }));
   }
 }
 
@@ -2049,7 +2404,7 @@ function closeTopModal(): void {
   if (!modal) return;
   // 模态框里的取消/关闭按钮就是"用户放弃"的语义，直接点它即可。
   const closer = modal.querySelector<HTMLButtonElement>(
-    '#prompt-cancel, #confirm-cancel, #alert-ok, #batch-cancel, #macro-cancel, #tunnel-close, #about-ok, #set-cancel',
+    '#prompt-cancel, #confirm-cancel, #alert-ok, #batch-cancel, #macro-cancel, #tunnel-close, #about-ok, #set-cancel, #xserver-cancel',
   );
   if (closer) closer.click();
   else modal.classList.add('hidden');
@@ -2140,21 +2495,64 @@ void listen<string>('menu:action', async (event) => {
     case 'tools-ssh': $<HTMLInputElement>('quick-input').focus(); break;
     case 'tools-sftp': await runTool('sftp'); break;
     case 'tools-telnet': await openTelnet(); break;
-    case 'tools-rdp': await runTool('rdp'); break;
-    case 'tools-vnc': await runTool('vnc'); break;
+    case 'tools-rdp': await openRdpDialog(); break;
+    case 'tools-vnc': await openVncDialog(); break;
+    case 'tools-spice': await openSpiceDialog(); break;
     case 'tools-ping': await pingHost(); break;
     case 'tools-portscan': await openPortScan(); break;
     case 'tools-packages': await showPackages(); break;
     case 'help-about': await openAbout(); break;
-    case 'set-general':
-    case 'set-terminal': openSettings(); break;
+    case 'settings-open': openSettings(); break;
+    case 'xserver-config': await openXServerConfig(); break;
     case 'macro-record': await toggleRecording(); break;
     case 'macro-play': openMacroModal(); break;
     default: break;
   }
 });
 
+/**
+ * 保存当前远程桌面标签（VNC/RDP）为会话。
+ *
+ * 和 saveCurrentSession 的区别：
+ * - 从 tab.remote 拿 host/port，不依赖 #quick-input
+ * - 不询问密码（VNC 密码存到 sessions.json 不安全；RDP 暂不支持存密码）
+ */
+async function saveRemoteSession(tab: Tab): Promise<void> {
+  if (!tab.remote) return;
+
+  // 从 tab.title 反解 host/port 不行（title 可能是自定义的），
+  // 所以要在 tab 上记录原始的 host/port。
+  const info = remoteTabInfo.get(tab.id);
+  if (!info) { setStatus(t('sessNeedRemoteInfo')); return; }
+
+  const group = (await showPrompt('sessSaveTitle', 'sessGroupPrompt')) || '';
+  const color = (await showPrompt('sessSaveTitle', 'sessColorPrompt')) || '';
+
+  try {
+    await invoke('save_session_full', {
+      host: info.host,
+      port: info.port,
+      user: '',                       // VNC/RDP 没有 user，留空
+      group,
+      color,
+      savePassword: false,            // 远程桌面不存密码
+      password: null,
+      protocol: info.protocol,        // 新增参数
+    });
+    await showSessionManager();
+    setStatus(t('sessSaved'));
+  } catch (e) {
+    setStatus(t('sessSaveFailed', { err: errText(e) }));
+  }
+}
+
 async function saveCurrentSession(): Promise<void> {
+  // 先看当前标签是不是远程桌面
+  const tab = currentTab();
+  if (tab?.remote) {
+    await saveRemoteSession(tab);
+    return;
+  }
   const parsed = parseTarget($<HTMLInputElement>('quick-input').value);
   if (!parsed.user) { setStatus(t('sessNeedQuickInput')); return; }
   const group = (await showPrompt('sessSaveTitle', 'sessGroupPrompt')) || '';

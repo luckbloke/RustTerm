@@ -1,6 +1,6 @@
 [package]
 name = "rustterm-tauri"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 
 [lib]
@@ -23,20 +23,23 @@ russh-sftp = "2"
 tokio = { version = "1", features = ["full", "process"] }
 anyhow = "1"
 keyring = "4.2.0"
+
 # VNC 客户端（纯 Rust）
 vnc-rs = "0.5"
 
 # RDP 客户端（纯 Rust）
-ironrdp = { version = "0.11", features = ["client", "graphics"] }
-ironrdp-tokio = "0.11"
-ironrdp-session = "0.11"
-ironrdp-graphics = "0.11"
+rdp = { package = "rdp-rs-2", version = "0.1.2" }
 
-# 图像编码（用于压缩帧数据）
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
+
+capsaicin-client = { git = "https://github.com/calibrae/capsaicin", branch = "main" }
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+rdp-rs-2 = { path = "../../rdp-rs-2-patched" }

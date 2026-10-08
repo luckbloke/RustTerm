@@ -96,8 +96,9 @@ const zh: Dict & typeof staticText = {
   treeSSH: 'SSH 客户端',
   treeSFTP: 'SFTP 客户端',
   treeTelnet: 'Telnet 客户端',
-  treeRDP: 'RDP 客户端（系统 mstsc）',
-  treeVNC: 'VNC 客户端（TightVNC）',
+  treeRDP: 'RDP 客户端',
+  treeVNC: 'VNC 客户端',
+  treeSpice: 'Spice 客户端',
   treeNoMacros: '暂无宏',
   sessionsCount: ({ n }: { n: number }) => `共 ${n} 个会话`,
   sessionSelected: ({ name }: { name: string }) => `已填入 ${name}`,
@@ -295,6 +296,35 @@ const zh: Dict & typeof staticText = {
   scanNoResult: '（暂无开放端口）',
   scanInvalidTarget: '目标格式错误',
   scanInvalidPorts: '端口格式错误',
+  
+  // RDP（新增）
+  rdpHostPrompt: 'RDP 服务器地址：',
+  rdpPortPrompt: '端口（默认 3389）：',
+  rdpUserPrompt: '用户名：',
+  rdpPasswordPrompt: '密码：',
+  rdpConnecting: ({ host, port }: { host: string; port: number }) => `正在连接 RDP ${host}:${port}…`,
+  rdpConnected: ({ host }: { host: string }) => `RDP 已连接 ${host}`,
+  rdpTabTitle: ({ host }: { host: string }) => `RDP: ${host}`,
+
+  // VNC（新增）
+  vncHostPrompt: 'VNC 服务器地址：',
+  vncPortPrompt: '端口（默认 5900）：',
+  vncPasswordPrompt: 'VNC 密码：',
+  vncConnecting: ({ host, port }: { host: string; port: number }) => `正在连接 VNC ${host}:${port}…`,
+  vncConnected: ({ host }: { host: string }) => `VNC 已连接 ${host}`,
+  vncTabTitle: ({ host }: { host: string }) => `VNC: ${host}`,
+
+  sessNeedRemoteInfo: '无法获取远程桌面会话信息',
+
+  // SPICE（新增）
+  spiceTitle: 'SPICE',
+  spiceHostPrompt: 'SPICE 服务器地址：',
+  spicePortPrompt: '端口（默认 5930）：',
+  spicePasswordPrompt: 'SPICE 密码（ticket）：',
+  spiceConnecting: ({ host, port }: { host: string; port: number }) => `正在连接 SPICE ${host}:${port}…`,
+  spiceConnected: ({ host }: { host: string }) => `SPICE 已连接 ${host}`,
+  spiceTabTitle: ({ host }: { host: string }) => `SPICE: ${host}`,
+  spiceFailed: ({ err }: { err: string }) => `SPICE 连接失败: ${err}`,
 
   // ---------- 设置 ----------
   settingsTitle: '设置',
@@ -336,6 +366,14 @@ const zh: Dict & typeof staticText = {
   x11SetFailed: ({ err }: { err: string }) => `设置 DISPLAY 失败: ${err}`,
   x11StartFailed: ({ err }: { err: string }) => `启动 X server 失败: ${err}`,
 
+  xserverConfigTitle: 'X server 配置',
+  xserverConfigHint: '按顺序尝试。第一个存在的可执行文件会被使用。',
+  xserverAdd: '添加',
+  xserverProgram: '可执行文件路径',
+  xserverArgs: '参数（空格分隔）',
+  xserverRemove: '删除',
+  xserverSaved: 'X server 配置已保存',
+
   // ---------- 工具 / 视图菜单 ----------
   toolsMenuTitle: '工具',
   toolsMenuBody: '1. SSH\n2. SFTP\n3. Telnet\n4. 端口转发\n5. Ping\n6. 包检查\n编号：',
@@ -346,12 +384,8 @@ const zh: Dict & typeof staticText = {
   // ---------- 外链 / 其他 ----------
   openLinkFailed: ({ err }: { err: string }) => `打开链接失败: ${err}`,
   rdpTitle: 'RDP',
-  rdpBody: 'RustTerm 不含 RDP 客户端。\n用系统 mstsc 打开？',
-  rdpStarted: '已启动 mstsc',
   rdpFailed: ({ err }: { err: string }) => `启动失败: ${err}`,
   vncTitle: 'VNC',
-  vncBody: 'RustTerm 不含 VNC 客户端。\n打开 TightVNC 下载页？',
-  vncOpened: '已打开下载页',
   vncFailed: ({ err }: { err: string }) => `打开失败: ${err}`,
   sessionRestoreHint: ({ n }: { n: number }) => `上次有 ${n} 个 SSH 标签，请在会话库中重连`,
 
@@ -367,9 +401,12 @@ const zh: Dict & typeof staticText = {
   errHostKeyUnknown: '主机密钥未记录，当前为「严格」策略，已拒绝连接。请先在 known_hosts 中登记该主机。',
   errHostKeyNoHome: '无法定位用户主目录，取不到 known_hosts，已按安全策略拒绝连接。',
   errHostKeyIo: ({ err }: { err: string }) => `读取 known_hosts 失败: ${err}`,
-  errXserverNotFound: '未找到 VcXsrv，请先安装',
+  errXserverNotFound: '未找到本地 X server（VcXsrv / Xming），请先安装',
   errXserverStartFailed: ({ err }: { err: string }) => `启动 X server 失败: ${err}`,
-  statusXserverStarted: 'X server 已启动（display :1）',
+  errXserverReadyTimeout: 'X server 启动超时，请检查是否有弹窗被遮挡或端口被占用',
+  errXserverNotRunning: 'X server 未运行',
+  errXserverNoFreeDisplay: '没有空闲的 X display 可用',
+  statusXserverStarted: ({ display }: { display: string }) => `X server 已启动（display ${display}）`,
   statusXserverStopped: 'X server 已停止',
   errUnknown: ({ err }: { err: string }) => `操作失败: ${err}`,
 };
@@ -451,8 +488,9 @@ const en: Dict & typeof staticText = {
   treeSSH: 'SSH client',
   treeSFTP: 'SFTP client',
   treeTelnet: 'Telnet client',
-  treeRDP: 'RDP client (system mstsc)',
-  treeVNC: 'VNC client (TightVNC)',
+  treeRDP: 'RDP client',
+  treeVNC: 'VNC client',
+  treeSpice: 'Spice client',
   treeNoMacros: 'No macros',
   sessionsCount: ({ n }: { n: number }) => `${n} session${n === 1 ? '' : 's'}`,
   sessionSelected: ({ name }: { name: string }) => `Selected ${name}`,
@@ -653,6 +691,32 @@ const en: Dict & typeof staticText = {
   scanInvalidTarget: 'Bad target format',
   scanInvalidPorts: 'Bad port format',
 
+  rdpHostPrompt: 'RDP server address:',
+  rdpPortPrompt: 'Port (default 3389):',
+  rdpUserPrompt: 'Username:',
+  rdpPasswordPrompt: 'Password:',
+  rdpConnecting: ({ host, port }: { host: string; port: number }) => `Connecting to RDP ${host}:${port}…`,
+  rdpConnected: ({ host }: { host: string }) => `RDP connected to ${host}`,
+  rdpTabTitle: ({ host }: { host: string }) => `RDP: ${host}`,
+
+  vncHostPrompt: 'VNC server address:',
+  vncPortPrompt: 'Port (default 5900):',
+  vncPasswordPrompt: 'VNC password:',
+  vncConnecting: ({ host, port }: { host: string; port: number }) => `Connecting to VNC ${host}:${port}…`,
+  vncConnected: ({ host }: { host: string }) => `VNC connected to ${host}`,
+  vncTabTitle: ({ host }: { host: string }) => `VNC: ${host}`,
+
+  sessNeedRemoteInfo: 'Cannot get remote desktop session info',
+
+  spiceTitle: 'SPICE',
+  spiceHostPrompt: 'SPICE server address:',
+  spicePortPrompt: 'Port (default 5930):',
+  spicePasswordPrompt: 'SPICE password (ticket):',
+  spiceConnecting: ({ host, port }: { host: string; port: number }) => `Connecting to SPICE ${host}:${port}…`,
+  spiceConnected: ({ host }: { host: string }) => `SPICE connected to ${host}`,
+  spiceTabTitle: ({ host }: { host: string }) => `SPICE: ${host}`,
+  spiceFailed: ({ err }: { err: string }) => `SPICE connection failed: ${err}`,
+  
   // ---------- settings ----------
   settingsTitle: 'Settings',
   settingsFontSize: 'Font size:',
@@ -693,6 +757,14 @@ const en: Dict & typeof staticText = {
   x11SetFailed: ({ err }: { err: string }) => `Could not set DISPLAY: ${err}`,
   x11StartFailed: ({ err }: { err: string }) => `Could not start X server: ${err}`,
 
+  xserverConfigTitle: 'X server configuration',
+  xserverConfigHint: 'Tried in order. The first existing executable is used.',
+  xserverAdd: 'Add',
+  xserverProgram: 'Executable path',
+  xserverArgs: 'Arguments (space-separated)',
+  xserverRemove: 'Remove',
+  xserverSaved: 'X server configuration saved',
+
   // ---------- tools / view menus ----------
   toolsMenuTitle: 'Tools',
   toolsMenuBody: '1. SSH\n2. SFTP\n3. Telnet\n4. Port forwarding\n5. Ping\n6. Check packages\nEnter a number:',
@@ -703,12 +775,8 @@ const en: Dict & typeof staticText = {
   // ---------- external ----------
   openLinkFailed: ({ err }: { err: string }) => `Could not open link: ${err}`,
   rdpTitle: 'RDP',
-  rdpBody: 'RustTerm has no RDP client.\nOpen the system mstsc instead?',
-  rdpStarted: 'mstsc started',
   rdpFailed: ({ err }: { err: string }) => `Could not start: ${err}`,
   vncTitle: 'VNC',
-  vncBody: 'RustTerm has no VNC client.\nOpen the TightVNC download page?',
-  vncOpened: 'Download page opened',
   vncFailed: ({ err }: { err: string }) => `Could not open: ${err}`,
   sessionRestoreHint: ({ n }: { n: number }) => `${n} SSH tab(s) from last time — reconnect from the session library`,
 
@@ -724,9 +792,12 @@ const en: Dict & typeof staticText = {
   errHostKeyUnknown: 'Host key is not recorded and the policy is "strict", so the connection was rejected. Add the host to known_hosts first.',
   errHostKeyNoHome: 'Cannot locate the user home directory, so known_hosts is unavailable; the connection was rejected.',
   errHostKeyIo: ({ err }: { err: string }) => `Could not read known_hosts: ${err}`,
-  errXserverNotFound: 'VcXsrv not found — install it first',
+  errXserverNotFound: 'No local X server (VcXsrv / Xming) found — install one first',
   errXserverStartFailed: ({ err }: { err: string }) => `Could not start the X server: ${err}`,
-  statusXserverStarted: 'X server started (display :1)',
+  errXserverReadyTimeout: 'X server did not become ready in time — check for a blocked dialog or a busy port',
+  errXserverNotRunning: 'X server is not running',
+  errXserverNoFreeDisplay: 'No free X display available',
+  statusXserverStarted: ({ display }: { display: string }) => `X server started (display ${display})`,
   statusXserverStopped: 'X server stopped',
   errUnknown: ({ err }: { err: string }) => `Operation failed: ${err}`,
 };
@@ -798,6 +869,12 @@ export function errorText(t: T, err: unknown): string {
       return t('errCancelled');
     case 'xserver-not-found':
       return t('errXserverNotFound');
+    case 'xserver-not-running':
+      return t('errXserverNotRunning');
+    case 'xserver-ready-timeout':
+      return t('errXserverReadyTimeout');
+    case 'xserver-no-free-display':
+      return t('errXserverNoFreeDisplay');
     default: {
       // 主机密钥类错误带冒号分隔的附加信息，单独解析
       if (raw.startsWith('host-key-changed:')) {

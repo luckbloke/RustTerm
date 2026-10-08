@@ -87,6 +87,7 @@
           <div class="tree-item" data-tool="telnet" data-i18n="treeTelnet"></div>
           <div class="tree-item" data-tool="rdp" data-i18n="treeRDP"></div>
           <div class="tree-item" data-tool="vnc" data-i18n="treeVNC"></div>
+          <div class="tree-item" data-tool="spice" data-i18n="treeSpice"></div>
         </div>
       </div>
       <div id="macros-panel" class="sidebar-panel hidden">
@@ -99,7 +100,7 @@
       <div id="tabs" role="tablist"></div>
       <div id="terminal-wrap">
         <div id="terminal-panes"></div>
-
+        <div id="remote-container" class="hidden"></div>
         <div id="welcome">
           <div class="welcome-logo" data-i18n="welcomeLogo"></div>
           <div class="welcome-buttons">
@@ -195,6 +196,22 @@
       <button id="scan-run" data-i18n="scanRun"></button>
       <button id="scan-stop" data-i18n="scanStop"></button>
       <button id="scan-close" data-i18n="commonClose"></button>
+    </div>
+  </div>
+</div>
+
+<!-- X server 配置 -->
+<div id="xserver-modal" class="modal hidden">
+  <div class="modal-content">
+    <h2 data-i18n="xserverConfigTitle">X server 配置</h2>
+    <p class="modal-hint" data-i18n="xserverConfigHint">
+      按顺序尝试。第一个存在的可执行文件会被使用。
+    </p>
+    <div id="xserver-list" class="xserver-list"></div>
+    <div class="modal-actions">
+      <button id="xserver-add" class="secondary" data-i18n="xserverAdd">添加</button>
+      <button id="xserver-save" class="primary" data-i18n="settingsSave">保存</button>
+      <button id="xserver-cancel" class="secondary" data-i18n="commonCancel">取消</button>
     </div>
   </div>
 </div>

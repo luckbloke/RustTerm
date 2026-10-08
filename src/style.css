@@ -656,3 +656,36 @@ label.inline-check input[type="checkbox"] { cursor: pointer; margin: 0; }
 #tunnel-list li button:hover { background: var(--bg-hover); }
 #batch-tabs input[type="checkbox"] { flex: 0 0 auto; cursor: pointer; }
 #batch-tabs .tab-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#remote-container {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  z-index: 5;   /* 盖住终端但低于弹窗 */
+}
+#remote-container.hidden { display: none; }
+
+.xserver-list {
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 12px 0;
+}
+.xserver-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.xserver-row input {
+  flex: 1;
+  min-width: 0;
+}
+.xserver-row .remove-btn {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+}
+.modal-hint {
+  color: var(--text-muted, #888);
+  font-size: 12px;
+  margin: 4px 0 12px 0;
+}
