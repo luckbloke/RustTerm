@@ -23,7 +23,10 @@ russh-sftp = "2"
 tokio = { version = "1", features = ["full", "process"] }
 anyhow = "1"
 keyring = "4.2.0"
+<<<<<<< HEAD
 rand = "0.8"
+=======
+>>>>>>> origin/main
 
 # VNC 客户端（纯 Rust）
 vnc-rs = "0.5"
@@ -35,8 +38,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 base64 = "0.22"
 
 capsaicin-client = { git = "https://github.com/calibrae/capsaicin", branch = "main" }
+<<<<<<< HEAD
 
 reqwest = { version = "0.12", features = ["json"] }
+=======
+>>>>>>> origin/main
 
 [profile.release]
 opt-level = 3

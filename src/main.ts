@@ -16,6 +16,7 @@ import { connectRemote, closeRemote, setupRemoteListeners } from './remote-deskt
 
 // 注册 VNC/RDP 事件监听（全局一次）
 setupRemoteListeners();
+<<<<<<< HEAD
 
 // RDP 状态事件：更新状态栏
 void listen<{
@@ -52,6 +53,8 @@ function rdpStateLabel(
       return state;
   }
 }
+=======
+>>>>>>> origin/main
 
 /* ==========================================================================
    1. 主题与语言
@@ -2441,7 +2444,11 @@ function closeTopModal(): void {
   if (!modal) return;
   // 模态框里的取消/关闭按钮就是"用户放弃"的语义，直接点它即可。
   const closer = modal.querySelector<HTMLButtonElement>(
+<<<<<<< HEAD
     '#prompt-cancel, #confirm-cancel, #alert-ok, #batch-cancel, #macro-cancel, #tunnel-close, #about-ok, #set-cancel, #xserver-cancel, #ai-config-cancel',
+=======
+    '#prompt-cancel, #confirm-cancel, #alert-ok, #batch-cancel, #macro-cancel, #tunnel-close, #about-ok, #set-cancel, #xserver-cancel',
+>>>>>>> origin/main
   );
   if (closer) closer.click();
   else modal.classList.add('hidden');

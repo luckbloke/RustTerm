@@ -296,6 +296,35 @@ const zh: Dict & typeof staticText = {
   scanNoResult: '（暂无开放端口）',
   scanInvalidTarget: '目标格式错误',
   scanInvalidPorts: '端口格式错误',
+  
+  // RDP（新增）
+  rdpHostPrompt: 'RDP 服务器地址：',
+  rdpPortPrompt: '端口（默认 3389）：',
+  rdpUserPrompt: '用户名：',
+  rdpPasswordPrompt: '密码：',
+  rdpConnecting: ({ host, port }: { host: string; port: number }) => `正在连接 RDP ${host}:${port}…`,
+  rdpConnected: ({ host }: { host: string }) => `RDP 已连接 ${host}`,
+  rdpTabTitle: ({ host }: { host: string }) => `RDP: ${host}`,
+
+  // VNC（新增）
+  vncHostPrompt: 'VNC 服务器地址：',
+  vncPortPrompt: '端口（默认 5900）：',
+  vncPasswordPrompt: 'VNC 密码：',
+  vncConnecting: ({ host, port }: { host: string; port: number }) => `正在连接 VNC ${host}:${port}…`,
+  vncConnected: ({ host }: { host: string }) => `VNC 已连接 ${host}`,
+  vncTabTitle: ({ host }: { host: string }) => `VNC: ${host}`,
+
+  sessNeedRemoteInfo: '无法获取远程桌面会话信息',
+
+  // SPICE（新增）
+  spiceTitle: 'SPICE',
+  spiceHostPrompt: 'SPICE 服务器地址：',
+  spicePortPrompt: '端口（默认 5930）：',
+  spicePasswordPrompt: 'SPICE 密码（ticket）：',
+  spiceConnecting: ({ host, port }: { host: string; port: number }) => `正在连接 SPICE ${host}:${port}…`,
+  spiceConnected: ({ host }: { host: string }) => `SPICE 已连接 ${host}`,
+  spiceTabTitle: ({ host }: { host: string }) => `SPICE: ${host}`,
+  spiceFailed: ({ err }: { err: string }) => `SPICE 连接失败: ${err}`,
 
   toolbarAi: 'AI',
   tipAi: 'AI 助手',
@@ -733,6 +762,7 @@ const en: Dict & typeof staticText = {
   scanInvalidTarget: 'Bad target format',
   scanInvalidPorts: 'Bad port format',
 
+<<<<<<< HEAD
   toolbarAi: 'AI',
   tipAi: 'AI assistant',
   aiTitle: 'AI assistant',
@@ -765,6 +795,8 @@ const en: Dict & typeof staticText = {
   aiAgentApprove: ({ cmd }: { cmd: string }) => `⚠️ Agent wants to run a dangerous command:\n\n${cmd}\n\nAllow?`,
   aiStop: 'Stop Agent',
 
+=======
+>>>>>>> origin/main
   rdpHostPrompt: 'RDP server address:',
   rdpPortPrompt: 'Port (default 3389):',
   rdpUserPrompt: 'Username:',
@@ -772,6 +804,7 @@ const en: Dict & typeof staticText = {
   rdpConnecting: ({ host, port }: { host: string; port: number }) => `Connecting to RDP ${host}:${port}…`,
   rdpConnected: ({ host }: { host: string }) => `RDP connected to ${host}`,
   rdpTabTitle: ({ host }: { host: string }) => `RDP: ${host}`,
+<<<<<<< HEAD
   rdpStateConnecting: 'RDP: connecting…',
   rdpStateAuthenticating: 'RDP: authenticating…',
   rdpStateActive: 'RDP: connected',
@@ -782,6 +815,8 @@ const en: Dict & typeof staticText = {
   rdpErrorAuthentication: 'RDP: authentication failed',
   rdpErrorSession: 'RDP: session ended',
   rdpErrorInternal: 'RDP: internal error',
+=======
+>>>>>>> origin/main
 
   vncHostPrompt: 'VNC server address:',
   vncPortPrompt: 'Port (default 5900):',

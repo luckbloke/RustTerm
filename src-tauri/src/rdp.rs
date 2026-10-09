@@ -6,19 +6,26 @@
 //! - 每次 client.read 返回后，立刻处理 input_rx，让"移动时"的输入几乎无延迟。
 //! - 静止时的输入延迟 = 服务器推流间隔，这是 rdp-rs-2 架构下的上限。
 //! - 每 50ms 发一帧，把一次画面更新里的几百个 64x64 图块合并成一个 dirty_rect。
+<<<<<<< HEAD
 //! - read 出错后自动重连 3 次（1s / 2s / 4s，带抖动）。
+=======
+>>>>>>> origin/main
 
 use anyhow::Result;
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
 use rdp::core::client::Connector;
 use rdp::core::event::{BitmapEvent, KeyboardEvent, PointerButton, PointerEvent, RdpEvent};
+<<<<<<< HEAD
 use serde::Serialize;
+=======
+>>>>>>> origin/main
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 
+<<<<<<< HEAD
 /// RDP 会话状态。前端根据它更新状态栏。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +48,8 @@ pub enum RdpErrorKind {
     Internal,
 }
 
+=======
+>>>>>>> origin/main
 pub struct RdpHandle {
     input_tx: std::sync::mpsc::Sender<RdpEvent>,
     cancel: Arc<AtomicBool>,
@@ -71,6 +80,7 @@ impl RdpHandle {
     }
 }
 
+<<<<<<< HEAD
 /// 发送 RDP 状态事件给前端。
 fn emit_state(
     app: &AppHandle,
@@ -125,6 +135,8 @@ fn reconnect_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(base_ms + jitter)
 }
 
+=======
+>>>>>>> origin/main
 fn pack_frame(x: u16, y: u16, w: u16, h: u16, jpeg: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(12 + jpeg.len());
     buf.extend_from_slice(&x.to_le_bytes());
@@ -150,6 +162,7 @@ pub async fn connect(
 ) -> Result<RdpHandle> {
     let cancel = Arc::new(AtomicBool::new(false));
     let (input_tx, input_rx) = std::sync::mpsc::channel::<RdpEvent>();
+<<<<<<< HEAD
 
     let cancel_clone = cancel.clone();
     let sid = session_id.clone();
@@ -161,11 +174,19 @@ pub async fn connect(
     let domain_c = domain.clone();
     let username_c = username.clone();
     let password_c = password.clone();
+=======
+
+    let cancel_clone = cancel.clone();
+    let sid = session_id.clone();
+    let app_out = app.clone();
+    let ch = frame_channel.clone();
+>>>>>>> origin/main
 
     tokio::task::spawn_blocking(move || {
         eprintln!("[RDP] ========== 开始连接 ==========");
         eprintln!("[RDP] addr={host}:{port} user={username} domain={domain} size={width}x{height}");
 
+<<<<<<< HEAD
         emit_state(
             &app_out,
             &sid,
@@ -242,6 +263,54 @@ pub async fn connect(
         let mut pointer_count: u64 = 0;
         let mut key_count: u64 = 0;
 
+=======
+        let addr = format!("{host}:{port}");
+        let tcp = match TcpStream::connect(&addr) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[RDP] TCP 连接失败: {e}");
+                let _ = app_out.emit("rdp:closed", serde_json::json!({ "sessionId": sid }));
+                return;
+            }
+        };
+        eprintln!("[RDP] TCP 连接成功");
+
+        // 不设 read timeout。rdp-rs-2 的 read_exact 超时后不会回滚已读字节，
+        // 会导致协议错位、连接崩溃。
+        let mut connector = Connector::new()
+            .screen(width, height)
+            .credentials(domain, username, password);
+
+        eprintln!("[RDP] 开始 RDP 协议握手...");
+        let mut client = match connector.connect(tcp) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[RDP] RDP 握手失败: {e:?}");
+                let _ = app_out.emit("rdp:closed", serde_json::json!({ "sessionId": sid }));
+                return;
+            }
+        };
+        eprintln!("[RDP] ✓ RDP 协议握手完成，session_id = {sid}");
+
+        let _ = app_out.emit(
+            "rdp:resolution",
+            serde_json::json!({
+                "sessionId": sid,
+                "width": width,
+                "height": height,
+            }),
+        );
+
+        let mut framebuffer = RgbImage::new(width as u32, height as u32);
+        let input_rx = input_rx;
+        let mut dirty_rect: Option<(u32, u32, u32, u32)> = None;
+        let mut tick: u64 = 0;
+        let mut read_count: u64 = 0;
+        let mut bitmap_count: u64 = 0;
+        let mut pointer_count: u64 = 0;
+        let mut key_count: u64 = 0;
+
+>>>>>>> origin/main
         // 上次发帧时间。每 50ms 才发一次，把一次画面更新里的
         // 几百个 64x64 图块合并成一个 dirty_rect。
         let mut last_emit = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -257,6 +326,7 @@ pub async fn connect(
             while let Ok(ev) = input_rx.try_recv() {
                 if let Err(e) = client.write(ev) {
                     eprintln!("[RDP] 发送输入失败: {e:?}");
+<<<<<<< HEAD
                 }
             }
 
@@ -380,11 +450,59 @@ pub async fn connect(
                         Err(err) => {
                             eprintln!("[RDP] 第 {} 次重连握手失败: {err:?}", attempt);
                         }
+=======
+                }
+            }
+
+            // 2. 读服务器事件（阻塞）。match event 按值。
+            read_count += 1;
+            let result = client.read(|event| match event {
+                RdpEvent::Bitmap(bitmap) => {
+                    bitmap_count += 1;
+                    if bitmap_count <= 5 {
+                        eprintln!(
+                            "[RDP] ← Bitmap #{}: bpp={} compress={} dest=({},{})-({},{})",
+                            bitmap_count,
+                            bitmap.bpp,
+                            bitmap.is_compress,
+                            bitmap.dest_left,
+                            bitmap.dest_top,
+                            bitmap.dest_right,
+                            bitmap.dest_bottom,
+                        );
+>>>>>>> origin/main
+                    }
+                    if bitmap.bpp != 32 {
+                        return;
+                    }
+                    if let Err(e) = apply_bitmap(&mut framebuffer, bitmap, &mut dirty_rect) {
+                        eprintln!("[RDP] apply_bitmap 失败: {e:?}");
                     }
                 }
+                RdpEvent::Pointer(_) => {
+                    pointer_count += 1;
+                }
+                RdpEvent::Key(_) => {
+                    key_count += 1;
+                }
+<<<<<<< HEAD
 
                 if reconnected {
                     continue;
+=======
+            });
+
+            if let Err(e) = result {
+                eprintln!("[RDP] ✗ read 出错（第 {read_count} 次）: {e:?}");
+                break;
+            }
+
+            // 3. read 一返回就立刻处理输入。
+            // 鼠标移动时服务器持续推画面，read 反复返回，输入几乎无延迟。
+            while let Ok(ev) = input_rx.try_recv() {
+                if let Err(e) = client.write(ev) {
+                    eprintln!("[RDP] read 后发送输入失败: {e:?}");
+>>>>>>> origin/main
                 }
 
                 emit_state(
@@ -403,6 +521,15 @@ pub async fn connect(
                 if let Err(e) = client.write(ev) {
                     eprintln!("[RDP] read 后发送输入失败: {e:?}");
                 }
+            }
+
+            // 4. 累积 50ms 后发一帧
+            if last_emit.elapsed() >= emit_interval {
+                if let Some((x, y, w, h)) = dirty_rect.take() {
+                    tick += 1;
+                    emit_region(&ch, &framebuffer, x, y, w, h);
+                }
+                last_emit = std::time::Instant::now();
             }
 
             // 4. 累积 50ms 后发一帧
@@ -483,9 +610,47 @@ fn apply_bitmap(
             }
             let pixel = fb.get_pixel_mut(px, py);
             *pixel = image::Rgb([src_row[i + 2], src_row[i + 1], src_row[i]]);
+<<<<<<< HEAD
+=======
         }
     }
 
+    let r = (dst_left, dst_top, w, h);
+    *dirty_rect = Some(match *dirty_rect {
+        None => r,
+        Some(d) => {
+            let x1 = d.0.min(r.0);
+            let y1 = d.1.min(r.1);
+            let x2 = (d.0 + d.2).max(r.0 + r.2);
+            let y2 = (d.1 + d.3).max(r.1 + r.3);
+            (x1, y1, x2 - x1, y2 - y1)
+>>>>>>> origin/main
+        }
+    });
+
+    Ok(())
+}
+
+fn emit_region(
+    channel: &Channel<InvokeResponseBody>,
+    fb: &RgbImage,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let x = x.min(fb.width());
+    let y = y.min(fb.height());
+    let w = w.min(fb.width() - x);
+    let h = h.min(fb.height() - y);
+    if w == 0 || h == 0 {
+        return;
+    }
+
+<<<<<<< HEAD
     let r = (dst_left, dst_top, w, h);
     *dirty_rect = Some(match *dirty_rect {
         None => r,
@@ -520,18 +685,24 @@ fn emit_region(
         return;
     }
 
+=======
+>>>>>>> origin/main
     let sub = image::imageops::crop_imm(fb, x, y, w, h).to_image();
     let is_full = w >= fb.width() && h >= fb.height();
     let quality = if is_full { 30 } else { 50 };
 
     let mut jpeg = Vec::new();
     let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, quality);
+<<<<<<< HEAD
     match encoder.encode(
         sub.as_raw(),
         sub.width(),
         sub.height(),
         image::ExtendedColorType::Rgb8,
     ) {
+=======
+    match encoder.encode(sub.as_raw(), sub.width(), sub.height(), image::ExtendedColorType::Rgb8) {
+>>>>>>> origin/main
         Ok(_) => {
             // 减少日志噪音：只在区域较大时打印
             if w >= 512 || h >= 512 {

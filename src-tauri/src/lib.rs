@@ -9,7 +9,10 @@ mod vnc;
 mod rdp;
 mod spice;
 mod xserver;
+<<<<<<< HEAD
 mod ai;
+=======
+>>>>>>> origin/main
 
 use hostkey::HostKeyPolicy;
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,7 @@ use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tauri::ipc::{Channel, InvokeResponseBody};
+<<<<<<< HEAD
 
 #[tauri::command]
 async fn ai_chat(
@@ -49,6 +53,8 @@ fn ai_is_write_command(cmd: String) -> bool {
 fn ai_is_task_done(reply: String) -> bool {
     ai::is_task_done(&reply)
 }
+=======
+>>>>>>> origin/main
 
 /// 端口扫描的取消标志表。前端点"停止"时按 scanId 找到对应标志置位。
 static SCAN_CANCELS: std::sync::OnceLock<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
