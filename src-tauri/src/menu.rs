@@ -95,23 +95,24 @@ pub fn build_with(handle: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
     let t_ssh = MenuItem::with_id(handle, "tools-ssh", t("SSH 客户端", "SSH client"), true, None::<&str>)?;
     let t_sftp = MenuItem::with_id(handle, "tools-sftp", t("SFTP 客户端", "SFTP client"), true, None::<&str>)?;
     let t_telnet = MenuItem::with_id(handle, "tools-telnet", t("Telnet 客户端", "Telnet client"), true, None::<&str>)?;
-    let t_rdp = MenuItem::with_id(handle, "tools-rdp", t("RDP 客户端（mstsc）", "RDP client (mstsc)"), true, None::<&str>)?;
-    let t_vnc = MenuItem::with_id(handle, "tools-vnc", t("VNC 客户端（TightVNC）", "VNC client (TightVNC)"), true, None::<&str>)?;
+    let t_rdp = MenuItem::with_id(handle, "tools-rdp",t("RDP 客户端", "RDP client"),true, None::<&str>,)?;
+    let t_vnc = MenuItem::with_id(handle, "tools-vnc",t("VNC 客户端", "VNC client"),true, None::<&str>,)?;
+    let t_spice = MenuItem::with_id(handle, "tools-spice",t("SPICE 客户端", "SPICE client"), true, None::<&str>)?;
     let sep5 = PredefinedMenuItem::separator(handle)?;
     let t_ping = MenuItem::with_id(handle, "tools-ping", t("Ping 主机", "Ping host"), true, None::<&str>)?;
     let t_packages = MenuItem::with_id(handle, "tools-packages", t("检查已装组件", "Check packages"), true, None::<&str>)?;
     let t_portscan = MenuItem::with_id(handle, "tools-portscan", t("端口扫描", "Port scan"), true, None::<&str>)?;
     let t_menu = Submenu::with_items(
         handle, t("工具", "Tools"), true,
-        &[&t_ssh, &t_sftp, &t_telnet, &t_rdp, &t_vnc, &sep5, &t_ping, &t_portscan, &t_packages],
+        &[&t_ssh, &t_sftp, &t_telnet, &t_rdp, &t_vnc,&t_spice, &sep5, &t_ping, &t_portscan, &t_packages],
     )?;
 
     // 设置
-    let s_general = MenuItem::with_id(handle, "set-general", t("常规设置…", "General settings..."), true, None::<&str>)?;
-    let s_terminal = MenuItem::with_id(handle, "set-terminal", t("终端设置…", "Terminal settings..."), true, None::<&str>)?;
+    let s_settings = MenuItem::with_id(handle, "settings-open", t("设置…", "Settings..."), true, None::<&str>)?;
+    let s_xserver = MenuItem::with_id(handle, "xserver-config", t("X server 配置…", "X server config..."), true, None::<&str>)?;
     let s_menu = Submenu::with_items(
         handle, t("设置", "Settings"), true,
-        &[&s_general, &s_terminal],
+        &[&s_settings, &s_xserver],
     )?;
 
     // 宏

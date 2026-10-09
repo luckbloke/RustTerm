@@ -5,16 +5,50 @@ mod pty;
 mod secret;
 mod sftp;
 mod ssh;
+mod vnc;
+mod rdp;
+mod spice;
+mod xserver;
+mod ai;
 
 use hostkey::HostKeyPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::sync::{Arc, Mutex, Mutex as StdMutex};
 use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use tauri::ipc::{Channel, InvokeResponseBody};
+
+#[tauri::command]
+async fn ai_chat(
+    config: ai::AiConfig,
+    history: Vec<ai::AiMessage>,
+) -> Result<String, String> {
+    ai::chat(&config, &history).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn ai_extract_commands(reply: String) -> Vec<String> {
+    ai::extract_commands(&reply)
+}
+
+#[tauri::command]
+fn ai_is_dangerous(cmd: String) -> bool {
+    ai::is_dangerous(&cmd)
+}
+
+#[tauri::command]
+fn ai_is_write_command(cmd: String) -> bool {
+    ai::is_write_command(&cmd)
+}
+
+#[tauri::command]
+fn ai_is_task_done(reply: String) -> bool {
+    ai::is_task_done(&reply)
+}
 
 /// 端口扫描的取消标志表。前端点"停止"时按 scanId 找到对应标志置位。
 static SCAN_CANCELS: std::sync::OnceLock<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
@@ -57,12 +91,223 @@ fn hide_console(_cmd: &mut Command) {}
 pub struct AppState {
     pub sessions: Mutex<HashMap<String, pty::PtyHandle>>,
     pub ssh_sessions: Mutex<HashMap<String, ssh::SshHandle>>,
+    pub vnc_sessions: Mutex<HashMap<String, vnc::VncHandle>>,
+    pub rdp_sessions: Mutex<HashMap<String, rdp::RdpHandle>>,
+    pub spice_sessions: Mutex<HashMap<String, spice::SpiceHandle>>,
     pub cancel_flags: Mutex<HashMap<String, Arc<sftp::TransferCancel>>>,
     /// 主机密钥校验策略，由前端持久化后同步进来。
     pub host_key_policy: Mutex<HostKeyPolicy>,
 }
 
-pub struct XServerState(pub StdMutex<Option<Child>>);
+#[tauri::command]
+async fn vnc_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+    password: String,
+    frame_channel: Channel<InvokeResponseBody>,
+) -> Result<String, String> {
+    let id = format!("vnc-{}", uuid_like());
+    eprintln!("[vnc_connect] 开始: host={host} port={port} sid={id}");
+
+    match vnc::connect(app, id.clone(), &host, port, &password, frame_channel).await {
+        Ok(handle) => {
+            eprintln!("[vnc_connect] 成功: sid={id}");
+            state.vnc_sessions.lock().unwrap().insert(id.clone(), handle);
+            Ok(id)
+        }
+        Err(e) => {
+            eprintln!("[vnc_connect] 失败: {e:?}");
+            for cause in e.chain() {
+                eprintln!("    - {cause}");
+            }
+            Err(format!("{e}"))
+        }
+    }
+}
+
+#[tauri::command]
+fn vnc_send_key(
+    state: tauri::State<AppState>,
+    session_id: String,
+    keysym: u32,
+    down: bool,
+) -> Result<(), String> {
+    let map = state.vnc_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("vnc session not found")?;
+    handle.send_key(keysym, down).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn vnc_send_pointer(
+    state: tauri::State<AppState>,
+    session_id: String,
+    x: u16,
+    y: u16,
+    buttons: u8,
+) -> Result<(), String> {
+    let map = state.vnc_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("vnc session not found")?;
+    handle.send_pointer(x, y, buttons).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn vnc_close(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(handle) = state.vnc_sessions.lock().unwrap().remove(&session_id) {
+        handle.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn rdp_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    width: u16,
+    height: u16,
+    frame_channel: Channel<InvokeResponseBody>,
+) -> Result<String, String> {
+    let id = format!("rdp-{}", uuid_like());
+    eprintln!("[rdp_connect] 开始: host={host} port={port} sid={id}");
+
+    let handle = rdp::connect(
+        app,
+        id.clone(),
+        host,
+        port,
+        String::new(),         // domain 留空
+        username,
+        password,
+        width,
+        height,
+        frame_channel,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    state.rdp_sessions.lock().unwrap().insert(id.clone(), handle);
+    Ok(id)
+}
+
+#[tauri::command]
+fn rdp_send_pointer(
+    state: tauri::State<AppState>,
+    session_id: String,
+    x: u16,
+    y: u16,
+    button: String,
+    down: bool,
+) -> Result<(), String> {
+    let map = state.rdp_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("rdp session not found")?;
+    handle.send_pointer_by_name(x, y, &button, down).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rdp_send_key(
+    state: tauri::State<AppState>,
+    session_id: String,
+    code: u16,
+    down: bool,
+) -> Result<(), String> {
+    let map = state.rdp_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("rdp session not found")?;
+    handle.send_key(code, down).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rdp_close(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(handle) = state.rdp_sessions.lock().unwrap().remove(&session_id) {
+        handle.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn spice_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+    password: String,
+) -> Result<String, String> {
+    let id = format!("spice-{}", uuid_like());
+    let handle = spice::connect(app, id.clone(), &host, port, &password)
+        .await
+        .map_err(|e| e.to_string())?;
+    state.spice_sessions.lock().unwrap().insert(id.clone(), handle);
+    Ok(id)
+}
+
+#[tauri::command]
+fn spice_send_key(
+    state: tauri::State<AppState>,
+    session_id: String,
+    scancode: u32,
+    down: bool,
+) -> Result<(), String> {
+    let map = state.spice_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("spice session not found")?;
+    handle.send_key(scancode, down).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn spice_send_pointer(
+    state: tauri::State<AppState>,
+    session_id: String,
+    x: i32,
+    y: i32,
+    button: Option<u8>,
+    down: Option<bool>,
+) -> Result<(), String> {
+    let map = state.spice_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("spice session not found")?;
+
+    if let Some(b) = button {
+        // 鼠标按键事件
+        let is_down = down.unwrap_or(false);
+        if is_down {
+            handle.send_mouse_press(b, 0).map_err(|e| e.to_string())?;
+        } else {
+            handle.send_mouse_release(b, 0).map_err(|e| e.to_string())?;
+        }
+    } else {
+        // 鼠标移动：SPICE 需要区分绝对/相对，这里默认用绝对定位
+        // （大多数现代 QEMU 配置有 usb-tablet，走 client 模式）
+        handle
+            .send_mouse_position(x.max(0) as u32, y.max(0) as u32, 0)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn spice_send_motion(
+    state: tauri::State<AppState>,
+    session_id: String,
+    dx: i32,
+    dy: i32,
+    buttons: u32,
+) -> Result<(), String> {
+    let map = state.spice_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("spice session not found")?;
+    handle.send_mouse_motion(dx, dy, buttons).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn spice_close(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(handle) = state.spice_sessions.lock().unwrap().remove(&session_id) {
+        handle.close();
+    }
+    Ok(())
+}
+
+pub struct XServerState(pub StdMutex<Option<xserver::XServer>>);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TunnelRecord {
@@ -195,12 +440,28 @@ fn known_hosts_file() -> Option<String> {
     hostkey::known_hosts_path().map(|p| p.to_string_lossy().to_string())
 }
 
+/// 给 SSH 会话的远程 shell 写入本地 X server 的 DISPLAY。
+///
+/// DISPLAY 必须取自已就绪的本地 X server 实例，而不是写死 `:1`：
+/// 若 :1 端口被占用，xserver 实际会监听更高的 display，写死值会让 X 应用静默连不上。
 #[tauri::command]
-fn setup_x11(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
-    let map = state.ssh_sessions.lock().unwrap();
-    let h = map.get(&session_id).ok_or("session-not-found")?;
-    let cmd = b"export DISPLAY=$(grep nameserver /etc/resolv.conf | awk '{print $2}'):1.0\n";
-    h.write(cmd).map_err(|e| e.to_string())
+fn setup_x11(
+    state: tauri::State<'_, AppState>,
+    xstate: tauri::State<'_, XServerState>,
+    session_id: String,
+) -> Result<(), String> {
+    let display = xstate
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| xserver::display_name(s.display))
+        .ok_or("xserver-not-running")?;
+    // 先把 MutexGuard 绑到变量，否则 .get() 借用的临时值在语句结束就被 drop。
+    let binding = state.ssh_sessions.lock().unwrap();
+    let h = binding.get(&session_id).ok_or("session-not-found")?;
+    h.write(format!("export DISPLAY={display}\n").as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 // ---------- SFTP ----------
@@ -348,6 +609,13 @@ pub struct SavedSession {
     /// 注意这里只存标记，**密码本身绝不写入 sessions.json**。
     #[serde(default)]
     pub save_password: bool,
+    /// 'ssh' | 'vnc' | 'rdp'，缺省 'ssh'（兼容旧存档）
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+}
+
+fn default_protocol() -> String {
+    "ssh".to_string()
 }
 
 fn sessions_path() -> Option<PathBuf> {
@@ -374,9 +642,18 @@ fn store_sessions(list: &[SavedSession]) {
 fn save_session_full(
     host: String, port: u16, user: String, group: String, color: String,
     save_password: bool, password: Option<String>,
+    protocol: Option<String>,
 ) -> Result<(), String> {
+    let protocol = protocol.unwrap_or_else(|| "ssh".to_string());
+
+    // SSH 的 name 是 user@host；VNC/RDP 没有 user，用 host:port
+    let name = if protocol == "ssh" {
+        format!("{user}@{host}")
+    } else {
+        format!("{host}:{port}")
+    };
+
     let mut list = load_sessions();
-    let name = format!("{user}@{host}");
 
     // 凭据库操作先做：失败就不要把"已保存"写进配置，否则界面会撒谎。
     if save_password {
@@ -385,20 +662,27 @@ fn save_session_full(
             Some(pw) if !pw.is_empty() => secret::save(&user, &host, port, &pw)?,
             // 没提供新密码，但此前已存过 → 保持不变
             _ => {
-                let already = list.iter().any(|s| s.host == host && s.user == user && s.port == port && s.save_password);
+                let already = list.iter().any(|s|
+                    s.host == host && s.user == user && s.port == port
+                    && s.protocol == protocol && s.save_password);
                 if !already {
                     return Err("secret-password-required".into());
                 }
             }
         }
-    } else if list.iter().any(|s| s.host == host && s.user == user && s.port == port && s.save_password) {
+    } else if list.iter().any(|s|
+        s.host == host && s.user == user && s.port == port
+        && s.protocol == protocol && s.save_password)
+    {
         // 用户取消勾选 → 顺手清掉凭据，避免留下无人引用的密码
         secret::delete(&user, &host, port)?;
     }
 
-    // 保存会话本身是 upsert：早前实现遇到已存在的就直接返回，
-    // 结果用户改分组/颜色/记住密码都无效。
-    match list.iter_mut().find(|s| s.host == host && s.user == user && s.port == port) {
+    // 保存会话本身是 upsert。
+    // 匹配条件必须带 protocol：否则同 host:port 的 SSH 会话和 VNC 会话会互相覆盖。
+    match list.iter_mut().find(|s|
+        s.host == host && s.user == user && s.port == port && s.protocol == protocol
+    ) {
         Some(existing) => {
             existing.group = group;
             existing.color = color;
@@ -406,9 +690,10 @@ fn save_session_full(
             existing.name = name;
         }
         None => list.push(SavedSession {
-            name, host, port, user, group, color, save_password,
+            name, host, port, user, group, color, save_password, protocol,
         }),
     }
+
     store_sessions(&list);
     Ok(())
 }
@@ -477,6 +762,7 @@ fn import_putty_sessions() -> Result<Vec<SavedSession>, String> {
                             group: String::new(),
                             color: String::new(),
                             save_password: false,
+                            protocol: "ssh".to_string(),
                         });
                     }
                 }
@@ -517,30 +803,65 @@ fn import_sessions(path: String) -> Result<usize, String> {
 }
 
 // ---------- X server ----------
-// 只返回机器可读的状态码，文案交给前端 i18n。
-// 原先在这里返回中文串，英文界面下状态栏会冒出中文。
+/// 启动本地 X server，成功后返回 DISPLAY（如 `127.0.0.1:1.0`）。
+///
+/// 幂等：已在运行时直接返回当前 display，前端可安全重复调用。
 #[tauri::command]
-fn xserver_start(state: tauri::State<XServerState>) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
-    if guard.is_some() { return Ok(()); }
-    let candidates = [r"C:\Program Files\VcXsrv\vcxsrv.exe", r"C:\Program Files (x86)\VcXsrv\vcxsrv.exe"];
-    for path in candidates {
-        if std::path::Path::new(path).exists() {
-            let child = Command::new(path)
-                .args([":1", "-multiwindow", "-clipboard", "-wgl", "-ac"])
-                .spawn()
-                .map_err(|e| format!("xserver-spawn-failed:{e}"))?;
-            *guard = Some(child);
-            return Ok(());
+async fn xserver_start(state: tauri::State<'_, XServerState>) -> Result<String, String> {
+    // 幂等：已在跑直接返回。{} 块让 MutexGuard 在 await 前释放。
+    {
+        let guard = state.0.lock().unwrap();
+        if let Some(srv) = guard.as_ref() {
+            eprintln!("[xserver] 已在运行，display :{}", srv.display);
+            return Ok(xserver::display_name(srv.display));
         }
     }
-    Err("xserver-not-found".into())
+
+    // 启动新的。这一步可能耗时数秒，不能持有 std Mutex（会卡死其它命令）。
+    let server = xserver::start().await?;
+    let name = xserver::display_name(server.display);
+    eprintln!("[xserver] 启动完成，display :{}", server.display);
+
+    // 赋值前再检查一次：如果并发调用已经启动了一个，就丢弃这次的
+    let mut guard = state.0.lock().unwrap();
+    if let Some(srv) = guard.as_ref() {
+        // 已经有别的实例在跑，把这次启动的 drop 掉（Drop 会 kill 它的进程）
+        eprintln!("[xserver] 并发启动，丢弃本次 display :{}", server.display);
+        drop(server);
+        return Ok(xserver::display_name(srv.display));
+    }
+    *guard = Some(server);
+    Ok(name)
+}
+
+/// 当前运行中的 X server 的 DISPLAY；未运行返回 `None`。
+#[tauri::command]
+fn xserver_status(state: tauri::State<XServerState>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| xserver::display_name(s.display))
+}
+
+/// 读取当前 X server 配置。
+#[tauri::command]
+fn xserver_get_config() -> Vec<xserver::XServerConfig> {
+    xserver::get_config()
+}
+
+/// 保存 X server 配置。
+#[tauri::command]
+fn xserver_save_config(list: Vec<xserver::XServerConfig>) -> Result<(), String> {
+    xserver::save_user_config(&list)
 }
 
 #[tauri::command]
-fn xserver_stop(state: tauri::State<XServerState>) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
-    if let Some(mut child) = guard.take() { let _ = child.kill(); }
+fn xserver_stop(state: tauri::State<'_, XServerState>) -> Result<(), String> {
+    if let Some(mut server) = state.0.lock().unwrap().take() {
+        server.stop();
+    }
     Ok(())
 }
 
@@ -708,6 +1029,9 @@ pub fn run() {
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
             ssh_sessions: Mutex::new(HashMap::new()),
+            vnc_sessions: Mutex::new(HashMap::new()),
+            rdp_sessions: Mutex::new(HashMap::new()),
+            spice_sessions: Mutex::new(HashMap::new()),
             cancel_flags: Mutex::new(HashMap::new()),
             host_key_policy: Mutex::new(HostKeyPolicy::default()),
         })
@@ -722,11 +1046,15 @@ pub fn run() {
             save_session_full, list_sessions, delete_session,
             secret_store_status, save_secret, get_secret, delete_secret,
             import_putty_sessions, export_sessions, import_sessions,
-            xserver_start, xserver_stop,
+            xserver_start, xserver_stop, xserver_status,xserver_get_config, xserver_save_config,
             tunnel_start, list_tunnels, remove_tunnel,
             telnet_connect, portscan::port_scan,portscan::cancel_scan,
+            vnc_connect, vnc_send_key, vnc_send_pointer, vnc_close,
+            rdp_connect, rdp_send_pointer, rdp_send_key, rdp_close,
+            spice_connect, spice_send_key, spice_send_pointer,spice_send_motion, spice_close,
             path_exists, file_version, open_external, exit_app, set_menu_language,
             set_host_key_policy, get_host_key_policy, known_hosts_file,
+            ai_chat, ai_extract_commands, ai_is_dangerous,ai_is_write_command,ai_is_task_done,
         ])
         .setup(|app| {
             let built = menu::build(app)?;
