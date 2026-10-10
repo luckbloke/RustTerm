@@ -37,6 +37,9 @@
     <button class="tool-btn" data-action="find" data-i18n-title="findPlaceholder">
       <span class="icon" aria-hidden="true">🔍</span><span data-i18n="findPlaceholder"></span>
     </button>
+    <button class="tool-btn" data-action="ai" data-i18n-title="tipAi">
+      <span class="icon" aria-hidden="true">🤖</span><span data-i18n="toolbarAi"></span>
+    </button>
     <button class="tool-btn" data-action="settings" data-i18n-title="tipSettings">
       <span class="icon" aria-hidden="true">⚙</span><span data-i18n="toolbarSettings"></span>
     </button>
@@ -87,6 +90,7 @@
           <div class="tree-item" data-tool="telnet" data-i18n="treeTelnet"></div>
           <div class="tree-item" data-tool="rdp" data-i18n="treeRDP"></div>
           <div class="tree-item" data-tool="vnc" data-i18n="treeVNC"></div>
+          <div class="tree-item" data-tool="spice" data-i18n="treeSpice"></div>
         </div>
       </div>
       <div id="macros-panel" class="sidebar-panel hidden">
@@ -99,7 +103,7 @@
       <div id="tabs" role="tablist"></div>
       <div id="terminal-wrap">
         <div id="terminal-panes"></div>
-
+        <div id="remote-container" class="hidden"></div>
         <div id="welcome">
           <div class="welcome-logo" data-i18n="welcomeLogo"></div>
           <div class="welcome-buttons">
@@ -199,6 +203,22 @@
   </div>
 </div>
 
+<!-- X server 配置 -->
+<div id="xserver-modal" class="modal hidden">
+  <div class="modal-content">
+    <h2 data-i18n="xserverConfigTitle">X server 配置</h2>
+    <p class="modal-hint" data-i18n="xserverConfigHint">
+      按顺序尝试。第一个存在的可执行文件会被使用。
+    </p>
+    <div id="xserver-list" class="xserver-list"></div>
+    <div class="modal-actions">
+      <button id="xserver-add" class="secondary" data-i18n="xserverAdd">添加</button>
+      <button id="xserver-save" class="primary" data-i18n="settingsSave">保存</button>
+      <button id="xserver-cancel" class="secondary" data-i18n="commonCancel">取消</button>
+    </div>
+  </div>
+</div>
+
   <!-- 设置 -->
   <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
@@ -267,6 +287,89 @@
       <div class="modal-actions">
         <button id="batch-run" class="primary" data-i18n="batchRun"></button>
         <button id="batch-cancel" data-i18n="commonCancel"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 助手面板（浮动侧边，不是 modal） -->
+  <div id="ai-panel" class="ai-panel hidden">
+    <div class="ai-header">
+      <div class="ai-header-left">
+        <strong data-i18n="aiTitle">AI 助手</strong>
+        <label class="ai-agent-toggle" data-i18n-title="aiAgentTip">
+          <input type="checkbox" id="ai-agent-mode" />
+          <span data-i18n="aiAgentMode">Agent</span>
+        </label>
+      </div>
+      <div class="ai-header-actions">
+        <button id="ai-stop" class="icon-btn hidden" data-i18n-title="aiStop">■</button>
+        <button id="ai-settings" class="icon-btn" data-i18n-title="aiSettings">⚙</button>
+        <button id="ai-clear" class="icon-btn" data-i18n-title="aiClear">🗑</button>
+        <button id="ai-close" class="icon-btn" title="Esc">×</button>
+      </div>
+    </div>
+    <div id="ai-messages" class="ai-messages"></div>
+    <div id="ai-agent-status" class="ai-agent-status hidden"></div>
+    <div class="ai-input-row">
+      <textarea id="ai-input" rows="2" data-i18n-placeholder="aiPlaceholder" spellcheck="false"></textarea>
+      <button id="ai-send" class="primary" data-i18n="aiSend">发送</button>
+    </div>
+  </div>
+
+  <!-- AI 配置 -->
+  <div id="ai-config-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="aiConfigTitle">AI 配置</h2>
+      <label class="stacked">
+        <span data-i18n="aiProvider">提供方</span>
+        <select id="ai-provider">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="ollama">Ollama（本地）</option>
+        </select>
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiApiKey">API Key</span>
+        <input id="ai-api-key" type="password" spellcheck="false" autocomplete="off" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiBaseUrl">Base URL</span>
+        <input id="ai-base-url" type="text" spellcheck="false" autocomplete="off" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiModel">模型</span>
+        <input id="ai-model" type="text" spellcheck="false" autocomplete="off" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiMaxTokens">最大 Token 数</span>
+        <input id="ai-max-tokens" type="number" value="2048" min="256" max="8192" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiTemperature">温度（0-1）</span>
+        <input id="ai-temperature" type="number" value="0.3" min="0" max="1" step="0.1" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiReadOnly">只读模式（禁用写命令）</span>
+        <input id="ai-readonly" type="checkbox" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiMaxHistory">对话历史最多保留（条）</span>
+        <input id="ai-max-history" type="number" value="20" min="2" max="100" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiContextLines">终端上下文最近行数</span>
+        <input id="ai-context-lines" type="number" value="50" min="5" max="500" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="aiContextMaxLineLen">上下文单行最大字符数</span>
+        <input id="ai-context-max-line-len" type="number" value="200" min="50" max="2000" />
+      </label>
+      <p class="hint" data-i18n="aiConfigHint">
+        API Key 仅保存在本地。Ollama 不需要 Key。
+      </p>
+      <div class="modal-actions">
+        <button id="ai-config-cancel" data-i18n="commonCancel"></button>
+        <button id="ai-config-save" class="primary" data-i18n="settingsSave"></button>
       </div>
     </div>
   </div>

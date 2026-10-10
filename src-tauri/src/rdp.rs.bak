@@ -1,0 +1,207 @@
+//! 纯 Rust 的 RDP 客户端实现，基于 IronRDP。
+//!
+//! IronRDP 采用 Sans-I/O 架构：核心协议层不处理 I/O，
+//! 由应用层提供传输（TCP/TLS）和运行时（tokio）。
+//! 这样可以把连接建立和 PDU 处理分离，避开 Tauri spawn 的 Send 约束。
+
+use anyhow::{Context, Result};
+use ironrdp::connector::{self, Credentials, DesktopSize};
+use ironrdp::pdu::gcc::KeyboardType;
+use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
+use ironrdp::session::{ActiveStage, ActiveStageOutput};
+use ironrdp_graphics::image_processing::PixelFormat;
+use ironrdp_session::image::DecodedImage;
+use ironrdp_tokio::TokioFramed;
+use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+
+/// RDP 会话句柄。
+pub struct RdpHandle {
+    cancel: Arc<AtomicBool>,
+}
+
+impl RdpHandle {
+    pub fn close(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// 连接到 RDP 服务器并启动事件循环。
+pub async fn connect(
+    app: AppHandle,
+    session_id: String,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    width: u16,
+    height: u16,
+) -> Result<RdpHandle> {
+    // ---------- 1. 构建连接配置 ----------
+    let config = connector::Config {
+        credentials: Credentials::UsernamePassword {
+            username: username.to_string(),
+            password: password.to_string(),
+        },
+        domain: None,
+        enable_tls: true,
+        enable_credssp: true,
+        keyboard_type: KeyboardType::IbmEnhanced,
+        keyboard_subtype: 0,
+        keyboard_layout: 0,
+        keyboard_functional_keys_count: 12,
+        desktop_size: DesktopSize { width, height },
+        client_name: "RustTerm".to_string(),
+        client_build: 0,
+        platform: MajorPlatformType::WINDOWS,
+        ..Default::default()
+    };
+
+    // ---------- 2. TCP 连接 ----------
+    let tcp = TcpStream::connect((host, port))
+        .await
+        .with_context(|| format!("无法连接 RDP 服务器 {host}:{port}"))?;
+
+    let client_addr = tcp.local_addr()?;
+    let mut framed = TokioFramed::new(tcp);
+    let mut connector = connector::ClientConnector::new(config, client_addr);
+
+    // ---------- 3. 初始协商 ----------
+    let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector).await?;
+
+    // ---------- 4. TLS 升级（手动用 tokio-rustls） ----------
+    let tls_stream = if should_upgrade {
+        let initial_stream = framed.into_inner_no_leftover();
+
+        // 测试环境：接受任何证书（生产环境应验证）
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = rustls::pki_types::ServerName::try_from(host.to_string())?;
+
+        connector.connect(domain, initial_stream).await?
+    } else {
+        // 服务器不支持 TLS，直接用原始 TCP（不推荐）
+        anyhow::bail!("RDP 服务器不支持 TLS，连接被拒绝");
+    };
+
+    // ---------- 5. 完成连接（CredSSP 认证） ----------
+    let mut upgraded_framed = TokioFramed::new(tls_stream);
+    let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
+
+    let mut network_client = ReqwestNetworkClient;
+    let connection_result = ironrdp_tokio::connect_finalize(
+        upgraded,
+        connector,
+        &mut upgraded_framed,
+        &mut network_client,
+        host.to_string(),
+        Vec::new(), // 简化：不使用证书公钥绑定
+        None,
+    )
+    .await?;
+
+    // ---------- 6. 创建图像缓冲和活跃会话 ----------
+    let mut image = DecodedImage::new(
+        PixelFormat::RgbA32,
+        connection_result.desktop_size.width,
+        connection_result.desktop_size.height,
+    );
+    let mut active_stage = ActiveStage::new(connection_result);
+
+    // ---------- 7. 启动 PDU 处理循环 ----------
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+    let sid = session_id.clone();
+    let app_out = app.clone();
+
+    tokio::spawn(async move {
+        let mut framed = upgraded_framed;
+
+        loop {
+            if cancel_clone.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let (action, payload) = match framed.read_pdu().await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[RDP] 读取错误: {e}");
+                    break;
+                }
+            };
+
+            match active_stage.process(&mut image, action, &payload) {
+                Ok(outputs) => {
+                    for output in outputs {
+                        match output {
+                            ActiveStageOutput::GraphicsUpdate(_) => {
+                                emit_rdp_frame(&app_out, &sid, &image);
+                            }
+                            ActiveStageOutput::ResponseFrame(frame) => {
+                                if let Err(e) = framed.write_all(&frame).await {
+                                    eprintln!("[RDP] 写入错误: {e}");
+                                    break;
+                                }
+                            }
+                            ActiveStageOutput::Terminate(reason) => {
+                                eprintln!("[RDP] 会话终止: {reason:?}");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[RDP] 处理错误: {e}");
+                    break;
+                }
+            }
+        }
+
+        let _ = app_out.emit("rdp:closed", serde_json::json!({ "sessionId": sid }));
+    });
+
+    Ok(RdpHandle { cancel })
+}
+
+/// 把 RDP 帧缓冲编码为 JPEG 并发送给前端。
+fn emit_rdp_frame(app: &AppHandle, sid: &str, image: &DecodedImage) {
+    let width = image.width();
+    let height = image.height();
+    let rgba = image.data();
+
+    // RGBA → RGB（JPEG 不支持 alpha 通道）
+    let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    for chunk in rgba.chunks(4) {
+        if chunk.len() >= 3 {
+            rgb.extend_from_slice(&chunk[..3]);
+        }
+    }
+
+    let mut jpeg = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75);
+    if encoder
+        .encode(&rgb, width as u32, height as u32, image::ExtendedColorType::Rgb8)
+        .is_ok()
+    {
+        let _ = app.emit(
+            "rdp:frame",
+            serde_json::json!({
+                "sessionId": sid,
+                "width": width,
+                "height": height,
+                "data": jpeg,
+            }),
+        );
+    }
+}

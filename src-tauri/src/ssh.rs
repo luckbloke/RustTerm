@@ -7,6 +7,7 @@ use russh::{Channel, ChannelMsg};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
+use std::borrow::Cow;
 
 pub struct SshHandle {
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -41,12 +42,46 @@ async fn connect_target<T>(
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let config = Arc::new(client::Config::default());
+    // 显式配置：在默认安全算法之后，追加旧算法兜底
+    let mut config = client::Config::default();
+    {
+        let p = &mut config.preferred;
+
+        // 1. 旧 KEX：DH group1 / group14 (SHA-1)
+        //    把它们追加到末尾，现代算法优先，旧算法兜底
+        // kex
+        let mut kex: Vec<russh::kex::Name> = p.kex.iter().copied().collect();
+        kex.push(russh::kex::DH_G1_SHA1);
+        kex.push(russh::kex::DH_G14_SHA1);
+        kex.push(russh::kex::DH_GEX_SHA1);
+        p.kex = Cow::Owned(kex);
+
+        // cipher
+        let mut cipher: Vec<russh::cipher::Name> = p.cipher.iter().copied().collect();
+        cipher.push(russh::cipher::AES_128_CBC);
+        cipher.push(russh::cipher::AES_192_CBC);
+        cipher.push(russh::cipher::AES_256_CBC);
+        cipher.push(russh::cipher::TRIPLE_DES_CBC);
+        p.cipher = Cow::Owned(cipher);
+
+        // mac
+        let mut mac: Vec<russh::mac::Name> = p.mac.iter().copied().collect();
+        mac.push(russh::mac::HMAC_SHA1);
+        p.mac = Cow::Owned(mac);
+
+
+        // 4. 旧主机密钥算法：ssh-rsa (SHA-1)
+        // key —— 用 cloned 而不是 copied
+        let mut key: Vec<russh::keys::Algorithm> = p.key.iter().cloned().collect();
+        key.push(russh::keys::Algorithm::Rsa { hash: None }); // None = SHA-1
+        p.key = Cow::Owned(key);
+    }
+
+    let config = Arc::new(config);
     let checker = HostKeyChecker::new(policy, host, port);
     let reporter = checker.failure_reporter();
     let result = client::connect_stream(config, target, checker).await;
     if result.is_err() {
-        // 让调用方能读到具体原因
         if let Ok(reason) = reporter.lock() {
             if let Ok(mut slot) = failure.lock() {
                 *slot = reason.clone();
