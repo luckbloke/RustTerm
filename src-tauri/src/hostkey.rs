@@ -7,7 +7,7 @@
 //! 在服务账户等环境下取不到，行为不可预测。
 
 use russh::keys::known_hosts::learn_known_hosts_path;
-use russh::keys::{check_known_hosts_path, PublicKey, PublicKeyOrCertificate};
+use russh::keys::{check_known_hosts_path, PublicKey};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -138,16 +138,8 @@ impl HostKeyChecker {
         self.failure.clone()
     }
 
-    fn accept(&self, key: &PublicKeyOrCertificate) -> bool {
-        // 证书模式：known_hosts 里记的是主机公钥，证书里带着同一把公钥。
-        // `Certificate::public_key()` 返回的是 `&KeyData`，需要自己包成 PublicKey。
-        let public = match key {
-            PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
-            PublicKeyOrCertificate::Certificate(cert) => {
-                PublicKey::new(cert.public_key().clone(), String::new())
-            }
-        };
-        match verify(self.policy, &self.host, self.port, &public) {
+    fn accept(&self, key: &PublicKey) -> bool {
+        match verify(self.policy, &self.host, self.port, key) {
             Ok(_) => true,
             Err(code) => {
                 if let Ok(mut slot) = self.failure.lock() {
@@ -164,7 +156,7 @@ impl russh::client::Handler for HostKeyChecker {
 
     async fn check_server_key(
         &mut self,
-        key: &PublicKeyOrCertificate,
+        key: &PublicKey,
     ) -> Result<bool, Self::Error> {
         Ok(self.accept(key))
     }

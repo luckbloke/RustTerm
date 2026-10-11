@@ -873,3 +873,14 @@ label.inline-check input[type="checkbox"] { cursor: pointer; margin: 0; }
   flex: 0 0 auto;
 }
 .ai-agent-status.hidden { display: none; }
+
+#ssh-new-modal label > span {
+  flex: 0 0 92px;
+  color: var(--text-dim);
+}
+#ssh-new-modal label > input,
+#ssh-new-modal label > select {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}

@@ -9,6 +9,8 @@ interface RemoteSession {
   wrapper: HTMLElement;
   width: number;
   height: number;
+  /** RDP 用：'fit-window' 或 'native'。其它协议为 undefined。 */
+  displayMode?: 'fit-window' | 'native';
 }
 
 const sessions = new Map<string, RemoteSession>();
@@ -20,6 +22,28 @@ const MOUSE_INTERVAL_MS = 16;
 
 /** 每个 RDP 会话的输入事件队列。 */
 const rdpInputQueues = new Map<string, any[]>();
+/** 每个 VNC 会话的输入事件队列。 */
+const vncInputQueues = new Map<string, any[]>();
+
+function ensureVncFlush(sessionId: string): void {
+  if (vncInputQueues.has(sessionId)) return;
+  vncInputQueues.set(sessionId, []);
+  setInterval(() => {
+    const queue = vncInputQueues.get(sessionId);
+    if (!queue || queue.length === 0) return;
+    const events = queue.splice(0, queue.length);
+    invoke('vnc_send_input', { sessionId, events }).catch((err) => {
+      console.error('[VNC] input 失败:', err);
+    });
+  }, 16);
+}
+
+function pushVncInput(sessionId: string, event: any): void {
+  console.log('[VNC] push', event);
+  ensureVncFlush(sessionId);
+  const queue = vncInputQueues.get(sessionId);
+  if (queue) queue.push(event);
+}
 
 /** 启动批量发送定时器（每个会话一个）。 */
 function ensureRdpFlush(sessionId: string): void {
@@ -40,6 +64,25 @@ function pushRdpInput(sessionId: string, event: any): void {
   if (queue) queue.push(event);
 }
 
+/**
+ * 为一个会话创建帧通道。
+ *
+ * 切标签时用它重新挂载：detach 后旧 Channel 作废，
+ * 切回来必须新建一个并再次 attach 给后端。
+ */
+export function makeFrameChannel(sessionId: string): Channel<ArrayBuffer> {
+  const ch = new Channel<ArrayBuffer>();
+  ch.onmessage = (raw) => handleBinaryFrame(sessionId, raw);
+  return ch;
+}
+
+/** 查询某会话的 displayMode。main.ts 的窗口 resize 联动需要它。 */
+export function getRemoteDisplayMode(
+  sessionId: string,
+): 'fit-window' | 'native' | undefined {
+  return sessions.get(sessionId)?.displayMode;
+}
+
 export async function connectRemote(
   type: 'vnc' | 'rdp' | 'spice',
   host: string,
@@ -51,8 +94,19 @@ export async function connectRemote(
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
   const canvas = document.createElement('canvas');
-  canvas.width = 1280;
-  canvas.height = 720;
+
+  // RDP 用 wrapper 的实际尺寸作为初始分辨率，保证 RDP 桌面 = 窗口尺寸，
+  // 画面不会被裁切或留黑边。VNC/SPICE 仍用 1280x720 兜底。
+  const rect = wrapper.getBoundingClientRect();
+  const initW = type === 'rdp'
+    ? Math.max(640, Math.min(7680, Math.floor(rect.width) || 1280))
+    : 1280;
+  const initH = type === 'rdp'
+    ? Math.max(480, Math.min(4320, Math.floor(rect.height) || 720))
+    : 720;
+
+  canvas.width = initW;
+  canvas.height = initH;
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.background = '#000';
@@ -68,6 +122,8 @@ export async function connectRemote(
   if (!ctx) throw new Error('无法获取 canvas 2D 上下文');
 
   let sessionId: string;
+  let displayMode: 'fit-window' | 'native' | undefined;
+
   if (type === 'vnc') {
     const frameChannel = new Channel<ArrayBuffer>();
     frameChannel.onmessage = (raw) => {
@@ -77,16 +133,46 @@ export async function connectRemote(
       host, port, password,
       frameChannel,
     });
+    
+    // 监听 VNC 状态，失败时清理 canvas
+    listen<{ sessionId: string; state: string; message: string | null; errorKind: string | null }>(
+      `vnc-state-${sessionId}`,
+      (e) => {
+        const { state, message } = e.payload;
+        if (state === 'failed') {
+          console.error('[VNC] 连接失败:', message);
+          // 清理 session 和 canvas
+          const s = sessions.get(sessionId);
+          if (s) {
+            s.canvas.remove();
+            sessions.delete(sessionId);
+          }
+          void invoke('vnc_close', { sessionId }).catch(() => {});
+        } else if (state === 'active') {
+          console.log('[VNC] 已连接');
+        }
+      },
+    ).catch(() => {});
+    
+    listen<{ sessionId: string; text: string }>(
+      `vnc-clipboard-${sessionId}`,
+      (e) => {
+        void navigator.clipboard.writeText(e.payload.text).catch(() => {});
+      },
+    ).catch(() => {});
   } else if (type === 'rdp') {
     const frameChannel = new Channel<ArrayBuffer>();
-    frameChannel.onmessage = (raw) => {
-      handleBinaryFrame(sessionId, raw);
-    };
     sessionId = await invoke<string>('rdp_connect', {
       host, port, username, password,
-      width: canvas.width, height: canvas.height,
+      width: initW, height: initH,
+      displayMode: 'native',
+      colorDepth: 32,
+      certificatePolicy: 'prompt',
+      clipboardMode: 'text-and-files',
       frameChannel,
     });
+    frameChannel.onmessage = (raw) => handleBinaryFrame(sessionId, raw);
+    displayMode = 'native';
   } else if (type === 'spice') {
     sessionId = await invoke<string>('spice_connect', { host, port, password });
   } else {
@@ -104,6 +190,7 @@ export async function connectRemote(
   sessions.set(sessionId, {
     id: sessionId, type, canvas, ctx, wrapper,
     width: canvas.width, height: canvas.height,
+    displayMode,
   });
 
   bindInput(sessionId, type, canvas);
@@ -131,6 +218,17 @@ async function handleBinaryFrame(
     const h = view.getUint16(6, true);
     const jpegLen = view.getUint32(8, true);
     if (bytes.byteLength < 12 + jpegLen) return;
+
+    // 只有全屏帧（x=0, y=0 且尺寸较大）才同步 canvas 尺寸。
+    // 小脏矩形（如 32x32）不能改 canvas，否则画面会被裁切。
+    if (x === 0 && y === 0 && w >= 64 && h >= 64) {
+      if (s.canvas.width !== w || s.canvas.height !== h) {
+        s.canvas.width = w;
+        s.canvas.height = h;
+        s.width = w;
+        s.height = h;
+      }
+    }
 
     const jpegBytes = new Uint8Array(bytes.subarray(12, 12 + jpegLen));
     const blob = new Blob([jpegBytes], { type: 'image/jpeg' });
@@ -162,11 +260,11 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     if (type === 'vnc') {
       const keysym = keyToKeysym(e);
       if (keysym === 0) return;
-      invoke('vnc_send_key', { sessionId, keysym, down: true }).catch(() => {});
+      pushVncInput(sessionId, { type: 'key', keysym, pressed: true });
     } else if (type === 'rdp') {
       const sc = keyToScancode(e);
       if (sc === 0) return;
-      pushRdpInput(sessionId, { kind: 'key', code: sc, down: true });
+      pushRdpInput(sessionId, { kind: 'key', code: sc, down: true, extended: isExtendedKey(e) });
     } else if (type === 'spice') {
       const sc = keyToScancode(e);
       if (sc === 0) return;
@@ -178,11 +276,11 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     if (type === 'vnc') {
       const keysym = keyToKeysym(e);
       if (keysym === 0) return;
-      invoke('vnc_send_key', { sessionId, keysym, down: false }).catch(() => {});
+      pushVncInput(sessionId, { type: 'key', keysym, pressed: false });
     } else if (type === 'rdp') {
       const sc = keyToScancode(e);
       if (sc === 0) return;
-      pushRdpInput(sessionId, { kind: 'key', code: sc, down: true });
+      pushRdpInput(sessionId, { kind: 'key', code: sc, down: false, extended: isExtendedKey(e) });
     } else if (type === 'spice') {
       const sc = keyToScancode(e);
       if (sc === 0) return;
@@ -190,7 +288,10 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     }
   });
 
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
 
   // ===== 鼠标 =====
   canvas.addEventListener('mousedown', (e) => {
@@ -214,6 +315,43 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     else if (type === 'rdp') sendPointerRdpMove(sessionId, canvas, e);
     else if (type === 'spice') sendPointerSpiceMove(sessionId, canvas, e);
   });
+
+  // ===== 滚轮（仅 RDP）=====
+  canvas.addEventListener('wheel', (e) => {
+    if (type !== 'rdp') return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
+    pushRdpInput(sessionId, {
+      kind: 'mouse-wheel',
+      deltaX: e.deltaX,
+      deltaY: e.deltaY,
+      x, y,
+    });
+  }, { passive: false });
+
+    // ===== 剪贴板粘贴（Ctrl+V 走这里）=====
+  canvas.addEventListener('paste', async (e) => {
+    const text = e.clipboardData?.getData('text');
+    if (!text) return;
+    if (type === 'rdp') {
+      e.preventDefault();
+      await invoke('rdp_set_clipboard_text', { sessionId, text }).catch(() => {});
+    } else if (type === 'vnc') {
+      e.preventDefault();
+      await invoke('vnc_set_clipboard_text', { sessionId, text }).catch(() => {});
+    }
+  });
+
+  // ===== 失焦时释放所有按键 =====
+  canvas.addEventListener('blur', () => {
+    if (type === 'rdp') {
+      pushRdpInput(sessionId, { kind: 'release-all-keys' });
+    } else if (type === 'vnc') {
+      pushVncInput(sessionId, { type: 'release-all-keys' });
+    }
+  });
 }
 
 function sendPointerVnc(sessionId: string, canvas: HTMLCanvasElement, e: MouseEvent): void {
@@ -221,10 +359,10 @@ function sendPointerVnc(sessionId: string, canvas: HTMLCanvasElement, e: MouseEv
   const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
   const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
   let rfbButtons = 0;
-  if (e.buttons & 1) rfbButtons |= 1;
-  if (e.buttons & 2) rfbButtons |= 4;
-  if (e.buttons & 4) rfbButtons |= 2;
-  invoke('vnc_send_pointer', { sessionId, x, y, buttons: rfbButtons }).catch(() => {});
+  if (e.buttons & 1) rfbButtons |= 1;   // left
+  if (e.buttons & 2) rfbButtons |= 4;   // middle
+  if (e.buttons & 4) rfbButtons |= 2;   // right
+  pushVncInput(sessionId, { type: 'pointer', x, y, buttonMask: rfbButtons });
 }
 
 function sendPointerRdp(
@@ -288,6 +426,11 @@ function keyToScancode(e: KeyboardEvent): number {
     ArrowRight: 0x4D, NumpadAdd: 0x4E, End: 0x4F, ArrowDown: 0x50,
     PageDown: 0x51, Insert: 0x52, Delete: 0x53,
     F11: 0x57, F12: 0x58,
+    ControlRight: 0x1D, AltRight: 0x38,
+    NumpadEnter: 0x1C, NumpadDivide: 0x35,
+    Numpad0: 0x52, Numpad1: 0x4F, Numpad2: 0x50, Numpad3: 0x51,
+    Numpad4: 0x4B, Numpad5: 0x4C, Numpad6: 0x4D, Numpad7: 0x47,
+    Numpad8: 0x48, Numpad9: 0x49, NumpadDecimal: 0x53,
   };
   if (e.code && map[e.code] !== undefined) return map[e.code];
   return 0;
@@ -308,6 +451,96 @@ function keyToKeysym(e: KeyboardEvent): number {
   };
   return map[e.key] ?? 0;
 }
+
+/** 判断是否是 RDP 意义上的扩展键（需置 extended 位）。 */
+function isExtendedKey(e: KeyboardEvent): boolean {
+  return e.code === 'ControlRight'
+    || e.code === 'AltRight'
+    || e.code === 'NumpadEnter'
+    || e.code === 'NumpadDivide'
+    || e.code === 'ArrowUp' || e.code === 'ArrowDown'
+    || e.code === 'ArrowLeft' || e.code === 'ArrowRight'
+    || e.code === 'Home' || e.code === 'End'
+    || e.code === 'PageUp' || e.code === 'PageDown'
+    || e.code === 'Insert' || e.code === 'Delete';
+}
+
+/* ==========================================================================
+   指针（光标）事件
+   ========================================================================== */
+
+interface RdpPointerEvent {
+  type: 'default' | 'hidden' | 'position' | 'bitmap';
+  sessionId: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  hotspotX?: number;
+  hotspotY?: number;
+  rgbaBase64?: string;
+}
+
+interface PointerState {
+  bitmapUrl: string | null;
+  hotspotX: number;
+  hotspotY: number;
+  hidden: boolean;
+  useDefault: boolean;
+}
+
+const pointerStates = new Map<string, PointerState>();
+
+function applyPointerEvent(s: RemoteSession, ev: RdpPointerEvent): void {
+  let state = pointerStates.get(s.id);
+  if (!state) {
+    state = {
+      bitmapUrl: null, hotspotX: 0, hotspotY: 0,
+      hidden: false, useDefault: true,
+    };
+    pointerStates.set(s.id, state);
+  }
+
+  switch (ev.type) {
+    case 'default':
+      state.useDefault = true;
+      state.bitmapUrl = null;
+      state.hidden = false;
+      break;
+    case 'hidden':
+      state.hidden = true;
+      state.useDefault = false;
+      state.bitmapUrl = null;
+      break;
+    case 'position':
+      return;
+    case 'bitmap':
+      state.useDefault = false;
+      state.hidden = false;
+      state.hotspotX = ev.hotspotX ?? 0;
+      state.hotspotY = ev.hotspotY ?? 0;
+      state.bitmapUrl = ev.rgbaBase64 ? `data:image/png;base64,${ev.rgbaBase64}` : null;
+      break;
+  }
+  redrawPointer(s, state);
+}
+
+function redrawPointer(s: RemoteSession, state: PointerState): void {
+  if (state.hidden) {
+    s.canvas.style.cursor = 'none';
+    return;
+  }
+  if (state.useDefault || !state.bitmapUrl) {
+    s.canvas.style.cursor = 'default';
+    return;
+  }
+  s.canvas.style.cursor =
+    `url(${state.bitmapUrl}) ${state.hotspotX} ${state.hotspotY}, default`;
+}
+
+/* ==========================================================================
+   SPICE 帧
+   ========================================================================== */
 
 function handleSpiceFrame(
   sessionId: string,
@@ -345,6 +578,7 @@ export function setupRemoteListeners(): void {
       s.canvas.remove();
       sessions.delete(event.payload.sessionId);
       drawingSessions.delete(event.payload.sessionId);
+      pointerStates.delete(event.payload.sessionId);
     }
   }).catch(() => {});
 
@@ -372,7 +606,32 @@ export function setupRemoteListeners(): void {
       s.canvas.remove();
       sessions.delete(event.payload.sessionId);
       drawingSessions.delete(event.payload.sessionId);
+      pointerStates.delete(event.payload.sessionId);
     }
+  }).catch(() => {});
+
+    // VNC 服务器 key 验证请求
+  listen<{
+    requestId: string;
+    sessionId: string;
+    host: string;
+    port: number;
+    fingerprint: string;
+    keyBits: number;
+    knownHostStatus: 'match' | 'changed' | 'unknown';
+  }>('vnc-server-key-verify', (event) => {
+    void handleVncServerKeyVerify(event.payload);
+  }).catch(() => {});
+
+  listen<RdpPointerEvent>('rdp:pointer', (event) => {
+    const payload = event.payload;
+    const s = sessions.get(payload.sessionId);
+    if (!s) return;
+    applyPointerEvent(s, payload);
+  }).catch(() => {});
+
+  listen<RdpCertificateVerifyEvent>('rdp-certificate-verify', (event) => {
+    void handleCertificateVerify(event.payload);
   }).catch(() => {});
 
   listen<{ sessionId: string }>('rdp:closed', (event) => {
@@ -382,16 +641,20 @@ export function setupRemoteListeners(): void {
       sessions.delete(event.payload.sessionId);
       drawingSessions.delete(event.payload.sessionId);
       rdpInputQueues.delete(event.payload.sessionId);
+      pointerStates.delete(event.payload.sessionId);
     }
   }).catch(() => {});
 }
 
 export async function closeRemote(sessionId: string, type: 'vnc' | 'rdp' | 'spice'): Promise<void> {
-  if (type === 'vnc') await invoke('vnc_close', { sessionId }).catch(() => {});
-  else if (type === 'rdp') try {
+  if (type === 'vnc') {
+    await invoke('vnc_close', { sessionId }).catch(() => {});
+    vncInputQueues.delete(sessionId);
+  } else if (type === 'rdp') try {
     await invoke('rdp_close', { sessionId });
   } finally {
     rdpInputQueues.delete(sessionId);
+    pointerStates.delete(sessionId);
   }
   else await invoke('spice_close', { sessionId }).catch(() => {});
   const s = sessions.get(sessionId);
@@ -400,4 +663,169 @@ export async function closeRemote(sessionId: string, type: 'vnc' | 'rdp' | 'spic
     sessions.delete(sessionId);
     drawingSessions.delete(sessionId);
   }
+}
+
+/**
+ * native 模式下窗口缩放时同步 RDP 分辨率。
+ * 由 main.ts 在窗口 resize 时调用。
+ */
+export async function resizeRemote(
+  sessionId: string,
+  width: number,
+  height: number,
+): Promise<void> {
+  await invoke('rdp_resize', { sessionId, width, height }).catch(() => {});
+}
+
+interface RdpCertificateVerifyEvent {
+  requestId: string;
+  sessionId: string;
+  host: string;
+  port: number;
+  fingerprint: string;
+  subject: string | null;
+  issuer: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  knownHostStatus: 'match' | 'changed' | 'unknown';
+}
+
+/**
+ * 一个最小的自绘 confirm 模态框。
+ *
+ * 不能用 window.confirm：Tauri 2 的 WebView 会拦截原生 confirm，
+ * 走 dialog 插件（plugin:dialog|confirm），而该命令又受 ACL 限制，
+ * 未在 capabilities 里声明就报 "not allowed"，导致确认框根本弹不出来。
+ *
+ * 用自绘的 DOM 模态框绕开 Tauri 的 IPC，纯前端实现。
+ */
+function simpleConfirm(title: string, message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+      position: fixed; inset: 0; z-index: 99999;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.4);
+    `;
+
+    const box = document.createElement('div');
+    box.style.cssText = `
+      max-width: 560px; min-width: 320px; max-height: 80vh;
+      overflow-y: auto; padding: 20px 24px;
+      background: var(--bg-card, #fff); color: var(--text, #1a1a1a);
+      border: 1px solid var(--border, #ccc);
+      border-radius: 4px; font-size: 13px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+    `;
+
+    const h = document.createElement('div');
+    h.style.cssText = 'font-weight: 600; font-size: 15px; margin-bottom: 12px;';
+    h.textContent = title;
+
+    const p = document.createElement('div');
+    p.style.cssText = 'white-space: pre-wrap; word-break: break-all; line-height: 1.5; margin-bottom: 16px;';
+    p.textContent = message;
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display: flex; gap: 8px; justify-content: flex-end;';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = '取消';
+    cancelBtn.style.cssText = `
+      padding: 5px 16px; border: 1px solid var(--border, #ccc);
+      background: var(--bg-panel, #f5f5f5); color: var(--text, #000);
+      border-radius: 2px; cursor: pointer; font-size: 12px;
+    `;
+
+    const okBtn = document.createElement('button');
+    okBtn.textContent = '接受';
+    okBtn.style.cssText = `
+      padding: 5px 16px; border: 1px solid var(--accent, #3a7bd5);
+      background: var(--accent, #3a7bd5); color: #fff;
+      border-radius: 2px; cursor: pointer; font-size: 12px;
+    `;
+
+    const cleanup = (value: boolean) => {
+      overlay.remove();
+      resolve(value);
+    };
+    cancelBtn.onclick = () => cleanup(false);
+    okBtn.onclick = () => cleanup(true);
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') cleanup(false);
+      else if (e.key === 'Enter') cleanup(true);
+    });
+
+    btnRow.append(cancelBtn, okBtn);
+    box.append(h, p, btnRow);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    okBtn.focus();
+  });
+}
+
+async function handleCertificateVerify(ev: RdpCertificateVerifyEvent): Promise<void> {
+  const lines = [
+    `服务器: ${ev.host}:${ev.port}`,
+    `指纹: ${ev.fingerprint}`,
+  ];
+  if (ev.subject) lines.push(`主体: ${ev.subject}`);
+  if (ev.issuer) lines.push(`颁发者: ${ev.issuer}`);
+  if (ev.validFrom) lines.push(`生效: ${ev.validFrom}`);
+  if (ev.validTo) lines.push(`到期: ${ev.validTo}`);
+
+  const title = ev.knownHostStatus === 'changed'
+    ? '⚠️ 证书指纹已变更！这可能意味着中间人攻击。'
+    : ev.knownHostStatus === 'unknown'
+      ? '首次连接，证书未记录。'
+      : '证书验证';
+
+  const accepted = await simpleConfirm(
+    title,
+    `${lines.join('\n')}\n\n是否接受此证书？`,
+  );
+  let remember = false;
+  if (accepted) {
+    remember = await simpleConfirm('记住证书', '是否永久记住此证书？（推荐）');
+  }
+
+  await invoke('rdp_respond_certificate', {
+    requestId: ev.requestId,
+    accepted,
+    remember,
+  }).catch((e) => console.error('[RD] 证书响应失败:', e));
+}
+
+interface VncServerKeyVerifyEvent {
+  requestId: string;
+  sessionId: string;
+  host: string;
+  port: number;
+  fingerprint: string;
+  keyBits: number;
+  knownHostStatus: 'match' | 'changed' | 'unknown';
+}
+
+async function handleVncServerKeyVerify(ev: VncServerKeyVerifyEvent): Promise<void> {
+  const title = ev.knownHostStatus === 'changed'
+    ? '⚠️ 服务器密钥已变更！这可能意味着中间人攻击。'
+    : ev.knownHostStatus === 'unknown'
+      ? '首次连接，服务器密钥未记录。'
+      : '服务器密钥验证';
+
+  const lines = [
+    `服务器: ${ev.host}:${ev.port}`,
+    `密钥位数: ${ev.keyBits}`,
+    `指纹: ${ev.fingerprint}`,
+  ];
+
+  const accepted = await simpleConfirm(
+    title,
+    `${lines.join('\n')}\n\n是否接受此服务器密钥？`,
+  );
+
+  await invoke('vnc_respond_server_key', {
+    requestId: ev.requestId,
+    accepted,
+  }).catch((e) => console.error('[RD] VNC server key 响应失败:', e));
 }

@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "xtask"
+test = false
+
+[dependencies]
+anyhow = "1"
+pico-args = "0.5"
+xshell = "0.2"
+tinyjson = "2.5"
+
+[lints]
+workspace = true

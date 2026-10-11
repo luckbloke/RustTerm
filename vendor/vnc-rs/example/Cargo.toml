@@ -1,0 +1,38 @@
+[package]
+name = "vnc-rs"
+version = "0.1.0"
+edition = "2021"
+authors  = ["Jovi Hsu <jv.hsu@outlook.com>"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/HsuJv/vnc-rs"
+homepage = "https://github.com/HsuJv/vnc-rs"
+documentation = "https://docs.rs/vnc-rs"
+description = "An async implementation of VNC client side protocol"
+keywords = ["vnc"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "vnc-rs"
+
+[dependencies]
+vnc-rs = { path="../" }
+#error
+thiserror = "^1.0"
+anyhow = "^1.0"
+
+#log
+tracing = { version = "^0.1", features = ["log"] }
+tracing-subscriber = { version = "^0.3" }
+
+# async
+tokio = { version = "^1", features = ["full"] }
+
+# x11
+minifb = "0.23.0"
+
+
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"

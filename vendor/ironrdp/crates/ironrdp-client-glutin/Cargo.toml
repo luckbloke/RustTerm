@@ -1,0 +1,49 @@
+[package]
+name = "ironrdp-client-glutin"
+version = "0.1.0"
+readme = "README.md"
+description = "GPU-accelerated RDP client using glutin"
+edition.workspace = true
+rust-version = "1.94"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["rustls"]
+rustls = ["ironrdp-tls/rustls"]
+native-tls = ["ironrdp-tls/native-tls"]
+
+[dependencies]
+
+# Protocols
+ironrdp.workspace = true
+ironrdp-tls.workspace = true
+sspi = { workspace = true, features = ["network_client"] }
+
+# CLI
+clap = { version = "4.2", features = ["derive", "cargo"] }
+exitcode = "1.1"
+
+# logging
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# async, futures
+tokio = { version = "1", features = ["full"]}
+tokio-util = { version = "0.7", features = ["compat"] }
+futures-util = "0.3"
+
+# Utils
+chrono = "0.4"
+anyhow = "1.0"
+
+# GUI
+glutin = "0.29"
+ironrdp-glutin-renderer = { path = "../glutin-renderer"}
+
+[lints]
+workspace = true

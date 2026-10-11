@@ -18,6 +18,7 @@
     "dialog:allow-save",
     "dialog:allow-message",
     "dialog:allow-ask",
+    "dialog:default",
     "dialog:allow-confirm"
   ]
 }

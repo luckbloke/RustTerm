@@ -1,0 +1,7 @@
+/.svelte-kit
+/package
+.env
+.env.*
+!.env.example
+/static/iron-remote-desktop-rdp/
+/static/iron-remote-desktop/

@@ -1,0 +1,309 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+env:
+  # Disable incremental compilation. CI builds are often closer to from-scratch builds, as changes
+  # are typically bigger than from a local edit-compile cycle.
+  # Incremental compilation also significantly increases the amount of IO and the size of ./target
+  # folder, which makes caching less effective.
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: short
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # Cache should never takes more than a few seconds to get downloaded.
+  # If it does, let’s just rebuild from scratch instead of hanging "forever".
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: 1
+  # Disabling debug info so compilation is faster and ./target folder is smaller.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  formatting:
+    name: Check formatting
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check formatting
+        run: cargo xtask check fmt -v
+
+  test-settings:
+    name: Check test settings
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # PR checkout uses a merge commit; depth 2 includes its base parent as HEAD^1.
+          fetch-depth: 2
+
+      - name: Check protected settings
+        if: github.event_name == 'pull_request'
+        run: cargo xtask check test-settings --base 'HEAD^1' --head 'HEAD' -v
+
+  typos:
+    name: Check typos
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Binary cache
+        uses: actions/cache@v5
+        with:
+          path: ./.cargo/local_root/bin
+          key: ${{ runner.os }}-bin-${{ github.job }}-${{ hashFiles('xtask/src/bin_version.rs') }}
+
+      - name: typos (prepare)
+        run: cargo xtask check install -v
+
+      - name: typos (check)
+        run: cargo xtask check typos -v
+
+  # TODO: Move this action to a dedicated repository.
+  openai-agent:
+    name: OpenAI agent action [${{ matrix.os }}]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        working-directory: .github/actions/openai-agent
+        run: npm ci
+
+      - name: Test PR automation
+        run: node --test .github/pr-automation/automation.test.js
+
+      - name: Run tests
+        working-directory: .github/actions/openai-agent
+        run: npm test
+
+      - name: Build action
+        working-directory: .github/actions/openai-agent
+        run: npm run build
+
+      - name: Verify bundled action
+        working-directory: .github/actions/openai-agent
+        run: git diff --exit-code -- dist
+
+  checks:
+    name: Checks [${{ matrix.os }}]
+    needs: [formatting]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows, linux, macos]
+        include:
+          - os: windows
+            runner: windows-latest
+          - os: linux
+            runner: ubuntu-latest
+          - os: macos
+            runner: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        uses: ./.github/actions/install-build-deps
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Binary cache
+        uses: actions/cache@v5
+        with:
+          path: ./.cargo/local_root/bin
+          key: ${{ runner.os }}-bin-${{ github.job }}-${{ hashFiles('xtask/src/bin_version.rs') }}
+
+      # Compilation is separated from execution so we know exactly the time for each step.
+
+      - name: Tests (compile)
+        run: cargo xtask check tests --no-run -v
+
+      - name: Tests (run)
+        run: cargo xtask check tests -v
+
+      - name: Build ActiveX host harness
+        if: matrix.os == 'windows'
+        run: dotnet build .\crates\ironrdp-activex\tests\ironrdp-axhost\IronRdpAxHost.csproj --configuration Release
+
+      - name: Lints
+        run: cargo xtask check lints -v
+
+      - name: Dependencies
+        run: cargo xtask check dependencies -v
+
+      - name: WASM (prepare)
+        run: cargo xtask wasm install -v
+
+      - name: WASM (check)
+        run: cargo xtask wasm check -v
+
+      - name: Lock files
+        run: cargo xtask check locks -v
+
+  fuzz:
+    name: Fuzzing
+    needs: [formatting]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: fuzz -> target
+
+      - name: Binary cache
+        uses: actions/cache@v5
+        with:
+          path: ./.cargo/local_root/bin
+          key: ${{ runner.os }}-bin-${{ github.job }}-${{ hashFiles('xtask/src/bin_version.rs') }}
+
+      - name: Prepare
+        run: cargo xtask fuzz install -v
+
+      # Simply run all fuzz targets for a few seconds, just checking there is nothing obviously wrong at a quick glance
+      - name: Fuzz
+        run: cargo xtask fuzz run -v
+
+      - name: Lock files
+        run: cargo xtask check locks -v
+
+  web:
+    name: Web Client
+    needs: [formatting]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Binary cache
+        uses: actions/cache@v5
+        with:
+          path: ./.cargo/local_root/bin
+          key: ${{ runner.os }}-bin-${{ github.job }}-${{ hashFiles('xtask/src/bin_version.rs') }}
+
+      - name: Prepare
+        run: cargo xtask web install -v
+
+      - name: Check
+        run: cargo xtask web check -v
+
+      - name: Lock files
+        run: cargo xtask check locks -v
+
+  ffi:
+    name: FFI
+    needs: [formatting]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Binary cache
+        uses: actions/cache@v5
+        with:
+          path: ./.cargo/local_root/bin
+          key: ${{ runner.os }}-bin-${{ github.job }}-${{ hashFiles('xtask/src/bin_version.rs') }}
+
+      - name: Prepare runner
+        run: cargo xtask ffi install -v
+
+      - name: Build native library
+        run: cargo xtask ffi build -v
+
+      - name: Generate bindings
+        run: cargo xtask ffi bindings -v
+
+      - name: Build .NET projects
+        run: cd ./ffi/dotnet && dotnet build
+
+  feature-matrix-setup:
+    name: feature matrix setup
+    needs: [formatting]
+    runs-on: ubuntu-latest
+    outputs:
+      feature-matrix: ${{ steps.setup-matrix.outputs.feature-matrix }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Setup matrix
+        id: setup-matrix
+        run: |
+          MATRIX="$(cargo xtask check features --list --format github-matrix)"
+          echo "feature-matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  feature-matrix:
+    name: feature matrix [${{ matrix.case }}]
+    needs: [formatting, feature-matrix-setup]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.feature-matrix-setup.outputs.feature-matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        uses: ./.github/actions/install-build-deps
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Binary cache
+        uses: actions/cache@v5
+        with:
+          path: ./.cargo/local_root/bin
+          key: ${{ runner.os }}-bin-${{ github.job }}-${{ hashFiles('xtask/src/bin_version.rs') }}
+
+      - name: Prepare
+        run: cargo xtask check install -v
+
+      - name: Run feature-matrix case
+        run: cargo xtask check features --case '${{ matrix.case }}' -v
+
+      - name: Lock files
+        run: cargo xtask check locks -v
+
+  success:
+    name: Success
+    if: ${{ always() }}
+    needs: [formatting, test-settings, typos, openai-agent, checks, fuzz, web, ffi, feature-matrix-setup, feature-matrix]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check success
+        run: |
+          $results = '${{ toJSON(needs.*.result) }}' | ConvertFrom-Json
+          $succeeded = $($results | Where { $_ -Ne "success" }).Count -Eq 0
+          exit $(if ($succeeded) { 0 } else { 1 })
+        shell: pwsh

@@ -1,0 +1,211 @@
+[workspace]
+members = [
+  "crates/*",
+  "benches",
+  "xtask",
+  "ffi",
+]
+resolver = "2"
+
+# FIXME: fix compilation
+exclude = [
+  "crates/ironrdp-client-glutin",
+  "crates/ironrdp-glutin-renderer",
+  "crates/ironrdp-replay-client",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/Devolutions/IronRDP"
+repository = "https://github.com/Devolutions/IronRDP"
+authors = ["Devolutions Inc. <infos@devolutions.net>", "Teleport <goteleport.com>"]
+keywords = ["rdp", "remote-desktop", "network", "client", "protocol"]
+categories = ["network-programming"]
+
+[workspace.dependencies]
+# Note that for better cross-tooling interactions, do not use workspace
+# dependencies for anything that is not "workspace internal" (e.g.: mostly
+# dev-dependencies). E.g.: release-plz can’t detect that a dependency has been
+# updated in a way warranting a version bump in the dependant if no commit is
+# touching a file associated to the crate. It is technically okay to use that
+# for "private" (i.e.: not used in the public API) dependencies too, but we
+# still want to make follow-up releases to stay up to date with the community,
+# even for private dependencies.
+expect-test = "1"
+proptest = "1.4"
+rstest = "0.26"
+
+# Note: we are trying to move away from using these crates.
+# They are being kept around for now for legacy compatibility,
+# but new usage should be avoided.
+num-derive = "0.5"
+num-traits = "0.2"
+
+[workspace.lints.rust]
+
+# == Safer unsafe == #
+unsafe_op_in_unsafe_fn = "warn"
+invalid_reference_casting = "warn"
+unused_unsafe = "warn"
+missing_unsafe_on_extern = "warn"
+unsafe_attr_outside_unsafe = "warn"
+
+# == Correctness == #
+ambiguous_negative_literals  = "warn"
+
+# == Style, readability == #
+elided_lifetimes_in_paths = "warn" # https://quinedot.github.io/rust-learning/dont-hide.html
+absolute_paths_not_starting_with_crate = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+keyword_idents = "warn"
+noop_method_call = "warn"
+macro_use_extern_crate = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+# missing_docs = "warn" # TODO: NOTE(@CBenoit): we probably want to ensure this in core tier crates only
+
+# == Compile-time / optimization == #
+unused_crate_dependencies = "warn"
+unused_macro_rules = "warn"
+
+# == Extra-pedantic rustc == #
+unit_bindings = "warn"
+
+[workspace.lints.clippy]
+
+# == Safer unsafe == #
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+multiple_unsafe_ops_per_block = "warn"
+missing_safety_doc = "warn"
+transmute_ptr_to_ptr = "warn"
+as_ptr_cast_mut = "warn"
+as_pointer_underscore = "warn"
+cast_ptr_alignment = "warn"
+fn_to_numeric_cast_any = "warn"
+ptr_cast_constness = "warn"
+
+# == Correctness == #
+as_conversions = "warn"
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+filetype_is_file = "warn"
+float_cmp = "warn"
+lossy_float_literal = "warn"
+float_cmp_const = "warn"
+as_underscore = "warn"
+unwrap_used = "warn"
+large_stack_frames = "warn"
+mem_forget = "warn"
+mixed_read_write_in_expression = "warn"
+needless_raw_strings = "warn"
+non_ascii_literal = "warn"
+panic = "warn"
+precedence_bits = "warn"
+rc_mutex = "warn"
+same_name_method = "warn"
+string_slice = "warn"
+suspicious_xor_used_as_pow = "warn"
+unused_result_ok = "warn"
+missing_panics_doc = "warn"
+
+# == Style, readability == #
+semicolon_outside_block = "warn" # With semicolon-outside-block-ignore-multiline = true
+clone_on_ref_ptr = "warn"
+cloned_instead_of_copied = "warn"
+pub_without_shorthand = "warn"
+infinite_loop = "warn"
+empty_enum_variants_with_brackets = "warn"
+deref_by_slicing = "warn"
+multiple_inherent_impl = "warn"
+map_with_unused_argument_over_ranges = "warn"
+partial_pub_fields = "warn"
+trait_duplication_in_bounds = "warn"
+type_repetition_in_bounds = "warn"
+checked_conversions = "warn"
+get_unwrap = "warn"
+similar_names = "warn" # Reduce risk of confusing similar names together, and protects against typos when variable shadowing was intended.
+str_to_string = "warn"
+std_instead_of_core = "warn"
+separated_literal_suffix = "warn"
+unused_self = "warn"
+useless_let_if_seq = "warn"
+string_add = "warn"
+range_plus_one = "warn"
+self_named_module_files = "warn"
+# TODO: partial_pub_fields = "warn" (should we enable only in pdu crates?)
+redundant_type_annotations = "warn"
+unnecessary_self_imports = "warn"
+try_err = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+
+# == Compile-time / optimization == #
+doc_include_without_cfg = "warn"
+inline_always = "warn"
+large_include_file = "warn"
+or_fun_call = "warn"
+rc_buffer = "warn"
+string_lit_chars_any = "warn"
+unnecessary_box_returns = "warn"
+large_futures = "warn"
+
+# == Extra-pedantic clippy == #
+allow_attributes = "warn"
+cfg_not_test = "warn"
+disallowed_script_idents = "warn"
+non_zero_suggestions = "warn"
+renamed_function_params = "warn"
+unused_trait_names = "warn"
+collection_is_never_read = "warn"
+copy_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+implicit_clone = "warn"
+large_types_passed_by_value = "warn"
+redundant_clone = "warn"
+alloc_instead_of_core = "warn"
+empty_drop = "warn"
+return_self_not_must_use = "warn"
+wildcard_dependencies = "warn"
+wildcard_imports = "warn"
+
+# == Let’s not merge unintended eprint!/print! statements in libraries == #
+print_stderr = "warn"
+print_stdout = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.production]
+inherits = "release"
+lto = true
+
+[profile.production-ffi]
+inherits = "release"
+strip = "symbols"
+codegen-units = 1
+lto = true
+
+[profile.production-wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+
+[profile.test.package.proptest]
+opt-level = 3
+
+[profile.test.package.rand_chacha]
+opt-level = 3
+
+[patch.crates-io]
+# FIXME: We need to catch up with Diplomat upstream again, but this is a significant amount of work.
+# In the meantime, we use this forked version which fixes an undefined behavior in the code expanded by the bridge macro.
+diplomat = { git = "https://github.com/CBenoit/diplomat", rev = "6dc806e80162b6b39509a04a2835744236cd2396" }
