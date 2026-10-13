@@ -1,0 +1,19 @@
+[package]
+name = "ironrdp-session-generators"
+version = "0.0.0"
+description = "`proptest` generators for `ironrdp-session` types"
+publish = false
+edition.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+# ironrdp-session.workspace = true
+# ironrdp-pdu-generators.workspace = true
+# proptest.workspace = true
+
+[lints]
+workspace = true
+

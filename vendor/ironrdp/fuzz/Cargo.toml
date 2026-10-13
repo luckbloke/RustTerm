@@ -1,0 +1,195 @@
+[package]
+name = "ironrdp-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[dependencies]
+ironrdp-fuzzing = { path = "../crates/ironrdp-fuzzing" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "pdu_decoding"
+path = "fuzz_targets/pdu_decoding.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rle_decompression"
+path = "fuzz_targets/rle_decompression.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bitmap_stream"
+path = "fuzz_targets/bitmap_stream.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cliprdr_format"
+path = "fuzz_targets/cliprdr_format.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "channel_processing"
+path = "fuzz_targets/channel_processing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cliprdr_channel_processing"
+path = "fuzz_targets/cliprdr_channel_processing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulk_mppc"
+path = "fuzz_targets/bulk_mppc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulk_ncrush"
+path = "fuzz_targets/bulk_ncrush.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulk_xcrush"
+path = "fuzz_targets/bulk_xcrush.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulk_round_trip"
+path = "fuzz_targets/bulk_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdu_round_trip"
+path = "fuzz_targets/pdu_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egfx_round_trip"
+path = "fuzz_targets/egfx_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egfx_avc420_decode"
+path = "fuzz_targets/egfx_avc420_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egfx_multi_frame"
+path = "fuzz_targets/egfx_multi_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rdpeudp_pdu_decode"
+path = "fuzz_targets/rdpeudp_pdu_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpemt_pdu_decode"
+path = "fuzz_targets/rdpemt_pdu_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpeudp_pdu_round_trip"
+path = "fuzz_targets/rdpeudp_pdu_round_trip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpemt_pdu_round_trip"
+path = "fuzz_targets/rdpemt_pdu_round_trip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpeudp_prefix_transform"
+path = "fuzz_targets/rdpeudp_prefix_transform.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpeudp_connection"
+path = "fuzz_targets/rdpeudp_connection.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpemt_tunnel"
+path = "fuzz_targets/rdpemt_tunnel.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpeudp_ack_vector"
+path = "fuzz_targets/rdpeudp_ack_vector.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rdpeusb_decode"
+path = "fuzz_targets/rdpeusb_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_decoding_invariants"
+path = "fuzz_targets/message_decoding_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egfx_avc444_decode"
+path = "fuzz_targets/egfx_avc444_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egfx_zgfx_decompress"
+path = "fuzz_targets/egfx_zgfx_decompress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egfx_surface_state"
+path = "fuzz_targets/egfx_surface_state.rs"
+test = false
+doc = false
+bench = false

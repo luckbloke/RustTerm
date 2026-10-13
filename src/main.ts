@@ -12,7 +12,9 @@ import {
   applyI18n, errorText, loadLang, makeT, saveLang, type Lang, type T,
 } from './i18n';
 import '@xterm/xterm/css/xterm.css';
-import { connectRemote, closeRemote, setupRemoteListeners } from './remote-desktop';
+import {
+  connectRemote, closeRemote, setupRemoteListeners, makeFrameChannel,getRemoteDisplayMode,
+} from './remote-desktop';
 
 // 注册 VNC/RDP 事件监听（全局一次）
 setupRemoteListeners();
@@ -36,6 +38,8 @@ function rdpStateLabel(
   switch (state) {
     case 'connecting':
       return t('rdpStateConnecting');
+    case 'certificate_verification':
+      return t('rdpStateCertificate');
     case 'authenticating':
       return t('rdpStateAuthenticating');
     case 'active':
@@ -44,10 +48,16 @@ function rdpStateLabel(
       return message ?? t('rdpStateReconnecting');
     case 'disconnected':
       return message ?? t('rdpStateDisconnected');
-    case 'failed':
-      return errorKind
-        ? t(`rdpError_${errorKind}` as any) || message || t('rdpStateFailed')
-        : message ?? t('rdpStateFailed');
+    case 'failed': {
+      const map: Record<string, string> = {
+        transport: 'rdpErrorTransport',
+        authentication: 'rdpErrorAuthentication',
+        session: 'rdpErrorSession',
+        internal: 'rdpErrorInternal',
+      };
+      const key = errorKind ? map[errorKind] : undefined;
+      return key ? t(key) : (message ?? t('rdpStateFailed'));
+    }
     default:
       return state;
   }
@@ -176,6 +186,11 @@ interface RemoteEntry {
  * tab.title 只反映 host，port 和 protocol 会丢，保存会话时需要这份记录。
  */
  const remoteTabInfo = new Map<number, { host: string; port: number; protocol: 'vnc' | 'rdp' | 'spice' }>();
+/**
+ * SSH 标签的连接信息。saveCurrentSession 需要从标签反查 host/port/user，
+ * 不能从 tab.title 反解（title 可能是自定义的）。
+ */
+const sshTabInfo = new Map<number, { host: string; port: number; user: string }>();
 
 let tabs: Tab[] = [];
 let activeTab = 0;
@@ -642,15 +657,23 @@ function activateTab(index: number): void {
   activeTab = index;
   const next = currentTab();
 
-  // 暂停旧标签的 RDP 推流，恢复新标签
-  if (previous?.remote?.type === 'rdp') {
-    invoke('rdp_set_streaming', {
+  if (previous?.remote?.type === 'rdp' && previous.remote.sessionId) {
+    void invoke('rdp_detach_frame_channel', {
+      sessionId: previous.remote.sessionId,
+    }).catch(() => {});
+    void invoke('rdp_set_streaming', {
       sessionId: previous.remote.sessionId,
       paused: true,
     }).catch(() => {});
   }
-  if (next?.remote?.type === 'rdp') {
-    invoke('rdp_set_streaming', {
+
+  if (next?.remote?.type === 'rdp' && next.remote.sessionId) {
+    const ch = makeFrameChannel(next.remote.sessionId);
+    void invoke('rdp_attach_frame_channel', {
+      sessionId: next.remote.sessionId,
+      frameChannel: ch,
+    }).catch(() => {});
+    void invoke('rdp_set_streaming', {
       sessionId: next.remote.sessionId,
       paused: false,
     }).catch(() => {});
@@ -693,6 +716,12 @@ function closeTab(tab: Tab, keepPane = false): void {
 
   // 远程桌面标签：销毁 VNC/RDP 后端会话和 canvas
   if (tab.remote) {
+    // 先摘掉帧通道，避免 rdp_close 期间后端还在往一个即将销毁的通道推帧。
+    if (tab.remote.type === 'rdp') {
+      void invoke('rdp_detach_frame_channel', {
+        sessionId: tab.remote.sessionId,
+      }).catch(() => {});
+    }
     void closeRemote(tab.remote.sessionId, tab.remote.type).catch(() => {});
   } else {
     // 普通终端标签：关闭 PTY/SSH 会话
@@ -701,6 +730,7 @@ function closeTab(tab: Tab, keepPane = false): void {
 
   // 清理远程桌面标签的元数据
   remoteTabInfo.delete(tab.id);
+  sshTabInfo.delete(tab.id);
 
   tab.term.dispose();
   tab.wrapper.remove();
@@ -1382,8 +1412,9 @@ async function showSessionManager(): Promise<void> {
           ev.preventDefault();
           if (!await showConfirm('sessDeleteTitle', 'sessDeleteConfirm', { name: session.name })) return;
           // delete_session 会一并清除凭据库里的密码
-          await invoke('delete_session', {
+            await invoke('delete_session', {
             host: session.host, port: session.port, user: session.user,
+            protocol: session.protocol ?? 'ssh',
           }).catch(() => {});
           await showSessionManager();
         };
@@ -1506,7 +1537,10 @@ async function connectSaved(session: SavedSession): Promise<void> {
       host: session.host, port: session.port, user: session.user, password,
       cols: dims.cols, rows: dims.rows,
     });
-    createTab(sessionId, t('sshTabTitle', { user: session.user, host: session.host }), true);
+    const newTab = createTab(sessionId, t('sshTabTitle', { user: session.user, host: session.host }), true);
+    sshTabInfo.set(newTab.id, {
+      host: session.host, port: session.port, user: session.user,
+    });
     setStatus(t('sshConnected', { user: session.user, host: session.host }));
   } catch (e) {
     setStatus(t('sshFailed', { err: errText(e) }));
@@ -1580,6 +1614,171 @@ function parseTarget(input: string): { user: string; host: string; port: number 
   return { user, host, port };
 }
 
+/**
+ * 弹出"新建 SSH 会话"表单。
+ *
+ * 和 quickConnect 的区别：quickConnect 解析 "user@host:port" 一行字符串，
+ * 这里走独立的多字段表单，适合不熟悉格式的用户，也方便以后加字段。
+ *
+ * @param defaults 可选，用于从已有会话预填。
+ */
+function sshNewDialog(defaults?: {
+  host?: string; port?: number; user?: string;
+}): void {
+  const modal = $('ssh-new-modal');
+  const hostInput = $<HTMLInputElement>('ssh-new-host');
+  const portInput = $<HTMLInputElement>('ssh-new-port');
+  const userInput = $<HTMLInputElement>('ssh-new-user');
+  const authSel = $<HTMLSelectElement>('ssh-new-auth');
+  const passwordRow = $('ssh-new-password-row');
+  const keyPathRow = $('ssh-new-key-path-row');
+  const passphraseRow = $('ssh-new-passphrase-row');
+  const passwordInput = $<HTMLInputElement>('ssh-new-password');
+  const keyPathInput = $<HTMLInputElement>('ssh-new-key-path');
+  const passphraseInput = $<HTMLInputElement>('ssh-new-passphrase');
+  const jumpInput = $<HTMLInputElement>('ssh-new-jump');
+
+  // 预填
+  hostInput.value = defaults?.host ?? '';
+  portInput.value = String(defaults?.port ?? 22);
+  userInput.value = defaults?.user ?? '';
+  passwordInput.value = '';
+  keyPathInput.value = '';
+  passphraseInput.value = '';
+  jumpInput.value = '';
+  authSel.value = 'password';
+
+  // 认证方式切换：密码行 vs 密钥行
+  const syncAuthRows = () => {
+    const isKey = authSel.value === 'key';
+    passwordRow.classList.toggle('hidden', isKey);
+    keyPathRow.classList.toggle('hidden', !isKey);
+    passphraseRow.classList.toggle('hidden', !isKey);
+  };
+  authSel.onchange = syncAuthRows;
+  syncAuthRows();
+
+  const cleanup = () => {
+    modal.classList.add('hidden');
+    $<HTMLButtonElement>('ssh-new-ok').onclick = null;
+    $<HTMLButtonElement>('ssh-new-cancel').onclick = null;
+    authSel.onchange = null;
+    modal.onkeydown = null;
+  };
+
+  const submit = async () => {
+    const host = hostInput.value.trim();
+    const port = parseInt(portInput.value, 10) || 22;
+    const user = userInput.value.trim();
+    if (!host || !user) {
+      setStatus(t('sshFormatError'));
+      return;
+    }
+    const opts = {
+      host, port, user,
+      auth: authSel.value,
+      password: passwordInput.value,
+      keyPath: keyPathInput.value.trim(),
+      passphrase: passphraseInput.value,
+      jumpRaw: jumpInput.value.trim(),
+    };
+    cleanup();
+    await connectFromForm(opts);
+  };
+
+  modal.classList.remove('hidden');
+  setTimeout(() => hostInput.focus(), 30);
+
+  $<HTMLButtonElement>('ssh-new-ok').onclick = () => void submit();
+  $<HTMLButtonElement>('ssh-new-cancel').onclick = cleanup;
+
+  // Enter 提交；Esc 交给全局 closeTopModal
+  modal.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); void submit(); }
+  };
+}
+
+/**
+ * 从 sshNewDialog 的表单参数连接 SSH。
+ *
+ * 逻辑和 quickConnect 里的 SSH 分支一致，但输入已经是结构化的，
+ * 不需要再解析 "user@host:port" 字符串。
+ */
+async function connectFromForm(opts: {
+  host: string;
+  port: number;
+  user: string;
+  auth: string;
+  password: string;
+  keyPath: string;
+  passphrase: string;
+  jumpRaw: string;
+}): Promise<void> {
+  const { host, port, user, auth, password, keyPath, passphrase, jumpRaw } = opts;
+
+  await new Promise((r) => setTimeout(r, 0));
+  const dims = dimsForNewTab();
+
+  try {
+    let sessionId: string;
+    if (auth === 'key') {
+      if (!keyPath) { setStatus(t('sshKeyPathPrompt')); return; }
+      setStatus(t('sshConnectingKey', { user, host }));
+      sessionId = await invoke<string>('ssh_connect_key', {
+        host, port, user, keyPath,
+        passphrase: passphrase || null,
+        cols: dims.cols, rows: dims.rows,
+      });
+    } else {
+      if (!password) { setStatus(t('sshPasswordPrompt', { user, host })); return; }
+      if (jumpRaw) {
+        const jump = parseTarget(jumpRaw);
+        if (!jump.user) { setStatus(t('sshFormatError')); return; }
+        const jumpPassword = await showPrompt(
+          'sshJumpPasswordTitle', 'sshJumpPasswordPrompt', '', true,
+          { user: jump.user, host: jump.host },
+        );
+        if (jumpPassword === null) return;
+        setStatus(t('sshConnectingJump', { host: jump.host, target: `${user}@${host}` }));
+        sessionId = await invoke<string>('ssh_connect_jump', {
+          jumpHost: jump.host, jumpPort: jump.port, jumpUser: jump.user, jumpPassword,
+          host, port, user, password,
+          cols: dims.cols, rows: dims.rows,
+        });
+      } else {
+        setStatus(t('sshConnecting', { user, host }));
+        sessionId = await invoke<string>('ssh_connect', {
+          host, port, user, password,
+          cols: dims.cols, rows: dims.rows,
+        });
+      }
+    }
+    const newTab = createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    sshTabInfo.set(newTab.id, { host, port, user });
+    setStatus(t('sshConnected', { user, host }));
+
+    // 自动保存会话到 sessions.json。
+    // 用户从"新建 SSH 会话"表单连上后，不需要再手动保存一次。
+    // 不存密码（密码保存需要凭据库交互，走手动路径）。
+    try {
+      await invoke('save_session_full', {
+        host, port, user,
+        group: '', color: '',
+        savePassword: false, password: null,
+        protocol: 'ssh',
+      });
+      void showSessionManager();
+    } catch (e) {
+      console.warn('[ssh] 自动保存会话失败:', e);
+    }
+  } catch (e) {
+    setStatus(t('sshFailed', { err: errText(e) }));
+    if (await showConfirm('sshRetryTitle', 'sshRetryBody')) {
+      await connectFromForm(opts);
+    }
+  }
+}
+
 async function quickConnect(): Promise<void> {
   const input = $<HTMLInputElement>('quick-input').value.trim();
   if (!input) return;
@@ -1650,7 +1849,8 @@ async function quickConnect(): Promise<void> {
         }
       }
     }
-    createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    const newTab = createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    sshTabInfo.set(newTab.id, { host, port, user });
     setStatus(t('sshConnected', { user, host }));
   } catch (e) {
     setStatus(t('sshFailed', { err: errText(e) }));
@@ -2239,7 +2439,7 @@ document.querySelectorAll<HTMLElement>('.tree-item[data-tool]').forEach((item) =
 
 async function runTool(tool: string): Promise<void> {
   switch (tool) {
-    case 'ssh': $<HTMLInputElement>('quick-input').focus(); break;
+    case 'ssh': sshNewDialog(); break;
     case 'sftp':
       if (currentTab()?.isSsh) sftpPanel.classList.remove('hidden');
       else setStatus(t('statusNeedSsh'));
@@ -2395,7 +2595,7 @@ document.addEventListener('paste', (e) => {
   if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
   const tab = currentTab();
   const text = e.clipboardData?.getData('text');
-  if (!tab || !text || tab.disconnected) return;
+  if (!tab || tab.remote || !text || tab.disconnected) return;
   sendInput(tab, text);
 });
 
@@ -2404,6 +2604,7 @@ panesEl.addEventListener('contextmenu', async (e) => {
   e.preventDefault();
   const tab = currentTab();
   if (!tab) return;
+  if (tab.remote) return;
   // 分屏时右键可能落在右侧窗格：操作对象必须是鼠标所在的那个终端，
   // 否则"复制"会复制到左边（通常是空的）选区。
   const paneEl = (e.target as HTMLElement | null)?.closest<HTMLElement>('.term-pane');
@@ -2455,7 +2656,7 @@ document.querySelectorAll<HTMLButtonElement>('.tool-btn').forEach((btn) => {
   btn.onclick = async () => {
     switch (btn.dataset.action) {
       case 'new-local': await startLocalTerminal(); break;
-      case 'new-ssh': $<HTMLInputElement>('quick-input').focus(); break;
+      case 'new-ssh': sshNewDialog(); break;
       case 'settings': openSettings(); break;
       case 'help': await openAbout(); break;
       case 'xserver': await startXServer(); break;
@@ -2481,7 +2682,7 @@ function closeTopModal(): void {
   if (!modal) return;
   // 模态框里的取消/关闭按钮就是"用户放弃"的语义，直接点它即可。
   const closer = modal.querySelector<HTMLButtonElement>(
-    '#prompt-cancel, #confirm-cancel, #alert-ok, #batch-cancel, #macro-cancel, #tunnel-close, #about-ok, #set-cancel, #xserver-cancel, #ai-config-cancel',
+    '#prompt-cancel, #confirm-cancel, #alert-ok, #batch-cancel, #macro-cancel, #tunnel-close, #about-ok, #set-cancel, #xserver-cancel, #ai-config-cancel, #ssh-new-cancel',
   );
   if (closer) closer.click();
   else modal.classList.add('hidden');
@@ -2522,7 +2723,7 @@ void listen<string>('menu:action', async (event) => {
   const tab = currentTab();
   switch (action) {
     case 'term-new-local': await startLocalTerminal(); break;
-    case 'term-new-ssh': $<HTMLInputElement>('quick-input').focus(); break;
+    case 'term-new-ssh': sshNewDialog(); break;
     case 'term-close-tab': if (tab) closeTab(tab); break;
     case 'sess-save': await saveCurrentSession(); break;
     case 'sess-library': await showSessionManager(); break;
@@ -2569,7 +2770,7 @@ void listen<string>('menu:action', async (event) => {
         .then(() => setStatus(t('statusXserverStopped')))
         .catch((e) => setStatus(errText(e)));
       break;
-    case 'tools-ssh': $<HTMLInputElement>('quick-input').focus(); break;
+    case 'tools-ssh': sshNewDialog(); break;
     case 'tools-sftp': await runTool('sftp'); break;
     case 'tools-telnet': await openTelnet(); break;
     case 'tools-rdp': await openRdpDialog(); break;
@@ -2624,14 +2825,25 @@ async function saveRemoteSession(tab: Tab): Promise<void> {
 }
 
 async function saveCurrentSession(): Promise<void> {
-  // 先看当前标签是不是远程桌面
+  // 远程桌面标签走独立路径
   const tab = currentTab();
   if (tab?.remote) {
     await saveRemoteSession(tab);
     return;
   }
-  const parsed = parseTarget($<HTMLInputElement>('quick-input').value);
-  if (!parsed.user) { setStatus(t('sessNeedQuickInput')); return; }
+
+  // 普通终端标签：从标签本身拿连接信息
+  // 本地终端（isSsh=false）没有远端会话，不能保存
+  if (!tab || !tab.isSsh) {
+    setStatus(t('sessNeedQuickInput'));
+    return;
+  }
+  const info = sshTabInfo.get(tab.id);
+  if (!info) {
+    setStatus(t('sessNeedQuickInput'));
+    return;
+  }
+
   const group = (await showPrompt('sessSaveTitle', 'sessGroupPrompt')) || '';
 
   // 记住密码是可选项：凭据库不可用时直接跳过，不打扰用户
@@ -2641,7 +2853,7 @@ async function saveCurrentSession(): Promise<void> {
   if (store.available) {
     savePassword = await showConfirm('sessSaveTitle', 'sessRememberPasswordAsk');
     if (savePassword) {
-      password = await askPassword(parsed.user, parsed.host, parsed.port);
+      password = await askPassword(info.user, info.host, info.port);
       if (password === null) return;
     }
   } else {
@@ -2651,8 +2863,9 @@ async function saveCurrentSession(): Promise<void> {
   const color = (await showPrompt('sessSaveTitle', 'sessColorPrompt')) || '';
   try {
     await invoke('save_session_full', {
-      host: parsed.host, port: parsed.port, user: parsed.user,
+      host: info.host, port: info.port, user: info.user,
       group, color, savePassword, password,
+      protocol: 'ssh',
     });
     await showSessionManager();
     setStatus(savePassword ? t('sessPasswordSaved') : t('sessSaved'));
@@ -3268,6 +3481,32 @@ void listen<{ scanId: string }>('scan:done', () => {
 window.addEventListener('error', (e) => setStatus(`JS: ${e.message}`));
 window.addEventListener('unhandledrejection', (e) => setStatus(`Promise: ${String(e.reason)}`));
 window.addEventListener('resize', scheduleFit);
+/**
+ * native 模式下，窗口缩放时同步 RDP 分辨率。
+ * 只对 displayMode === 'native' 的 RDP 会话生效。
+ * 加 300ms 防抖：拖动窗口会连续触发 resize，每次都发 rdp_resize 会让服务器
+ * 不停重新协商分辨率。
+ */
+let rdpResizeTimer: number | undefined;
+window.addEventListener('resize', () => {
+  const tab = currentTab();
+  if (tab?.remote?.type !== 'rdp' || !tab.remote.sessionId) return;
+  if (getRemoteDisplayMode(tab.remote.sessionId) !== 'native') return;
+
+  window.clearTimeout(rdpResizeTimer);
+  rdpResizeTimer = window.setTimeout(() => {
+    const tabNow = currentTab();
+    if (tabNow !== tab || !tabNow.remote) return;
+    const rect = tabNow.wrapper.getBoundingClientRect();
+    const w = Math.max(640, Math.min(7680, Math.floor(rect.width)));
+    const h = Math.max(480, Math.min(4320, Math.floor(rect.height)));
+    void invoke('rdp_resize', {
+      sessionId: tabNow.remote.sessionId,
+      width: w,
+      height: h,
+    }).catch(() => {});
+  }, 300);
+});
 
 document.documentElement.dataset.lang = lang;
 applyI18n(t);

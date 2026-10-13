@@ -1,0 +1,31 @@
+[package]
+name = "ironrdp-rdpeusb"
+version = "0.1.0"
+description = "Remote Desktop Protocol: USB Devices Virtual Channel Extension implementation"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+publish = false
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+std = []
+
+[dependencies]
+ironrdp-core = { path = "../ironrdp-core", version = "0.2", features = ["alloc"] } # public
+ironrdp-pdu = { path = "../ironrdp-pdu", version = "0.9", features = ["alloc"] } # public
+ironrdp-dvc = { path = "../ironrdp-dvc", version = "0.8" } # public
+ironrdp-usb = { path = "../ironrdp-usb", version = "0.1" } # public
+ironrdp-str = { path = "../ironrdp-str", version = "0.1" }
+
+[lints]
+workspace = true

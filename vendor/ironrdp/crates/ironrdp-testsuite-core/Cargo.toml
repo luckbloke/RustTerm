@@ -1,0 +1,77 @@
+[package]
+name = "ironrdp-testsuite-core"
+version = "0.0.0"
+edition = "2024"
+description = "IronRDP test suite"
+publish = false
+autotests = false
+
+[lib]
+doctest = false
+test = false
+
+[features]
+# Internal (PRIVATE!) features used to aid testing.
+# Don't rely on these whatsoever. They may disappear at any time.
+# Added here because it includes/link to some files from other crates
+__bench = ["dep:visibility"]
+openh264-bundled = ["ironrdp-egfx/openh264-bundled", "dep:openh264"]
+
+[[test]]
+name = "integration_tests_core"
+path = "tests/main.rs"
+harness = true
+
+[dependencies]
+array-concat = "0.5"
+expect-test = "1"
+ironrdp-core.path = "../ironrdp-core"
+ironrdp-egfx.path = "../ironrdp-egfx"
+ironrdp-pdu.path = "../ironrdp-pdu"
+paste = "1"
+openh264 = { version = "0.9", optional = true, default-features = false, features = ["source"] }
+visibility = { version = "0.1", optional = true }
+
+[dev-dependencies]
+anyhow = "1"
+async-trait = "0.1"
+expect-test.workspace = true
+hex = "0.4"
+ironrdp-cliprdr-format.path = "../ironrdp-cliprdr-format"
+ironrdp-cliprdr = { path = "../ironrdp-cliprdr", features = ["__test"] }
+ironrdp-acceptor.path = "../ironrdp-acceptor"
+ironrdp-bulk.path = "../ironrdp-bulk"
+ironrdp-connector.path = "../ironrdp-connector"
+ironrdp-displaycontrol.path = "../ironrdp-displaycontrol"
+ironrdp-dvc.path = "../ironrdp-dvc"
+ironrdp-echo.path = "../ironrdp-echo"
+ironrdp-rdpei.path = "../ironrdp-rdpei"
+ironrdp-error = { path = "../ironrdp-error", features = ["std"] }
+ironrdp-fuzzing.path = "../ironrdp-fuzzing"
+ironrdp-graphics.path = "../ironrdp-graphics"
+ironrdp-str.path = "../ironrdp-str"
+ironrdp-svc.path = "../ironrdp-svc"
+ironrdp-input.path = "../ironrdp-input"
+ironrdp-rdcleanpath.path = "../ironrdp-rdcleanpath"
+ironrdp-rdpdr.path = "../ironrdp-rdpdr"
+ironrdp-rdpeai.path = "../ironrdp-rdpeai"
+ironrdp-rdpecam = { path = "../ironrdp-rdpecam" }
+ironrdp-rdpel.path = "../ironrdp-rdpel"
+ironrdp-rdpemt = { path = "../ironrdp-rdpemt", features = ["std"] }
+ironrdp-rdpeudp = { path = "../ironrdp-rdpeudp", features = ["std"] }
+ironrdp-rdpeusb.path = "../ironrdp-rdpeusb"
+ironrdp-usb.path = "../ironrdp-usb"
+ironrdp-rdpsnd = { path = "../ironrdp-rdpsnd", features = ["__test"] }
+ironrdp-server.path = "../ironrdp-server"
+ironrdp-session = { path = "../ironrdp-session", features = ["qoi", "__test"] }
+ironrdp-cfg.path = "../ironrdp-cfg"
+ironrdp-propertyset.path = "../ironrdp-propertyset"
+ironrdp-rdpfile.path = "../ironrdp-rdpfile"
+png = "0.18"
+pretty_assertions = "1.4"
+proptest.workspace = true
+rstest.workspace = true
+tokio = { version = "1", features = ["macros", "rt", "io-util", "sync", "test-util"] }
+
+[lints]
+workspace = true

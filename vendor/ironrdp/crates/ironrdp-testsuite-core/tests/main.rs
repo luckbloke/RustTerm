@@ -1,0 +1,44 @@
+#![allow(unused_crate_dependencies)] // false positives because there is both a library and a binary
+#![allow(clippy::panic, reason = "panic is acceptable in tests")]
+#![allow(clippy::unwrap_used, reason = "unwrap is fine in tests")]
+//! Integration Tests (IT)
+//!
+//! Integration tests are all contained in this single crate, and organized in modules.
+//! This is to prevent `rustc` to re-link the library crates with each of the integration
+//! tests (one for each *.rs file / test crate under the `tests/` folder).
+//! Performance implication: https://github.com/rust-lang/cargo/pull/5022#issuecomment-364691154
+//!
+//! This is also good for execution performance.
+//! Cargo will run all tests from a single binary in parallel, but
+//! binaries themselves are run sequentially.
+
+mod cfg;
+mod clipboard;
+mod connector;
+mod displaycontrol;
+mod dvc;
+mod echo;
+mod egfx;
+mod error;
+mod fuzz_regression;
+mod graphics;
+mod input;
+mod pcb;
+mod pdu;
+mod propertyset;
+mod rdcleanpath;
+mod rdpdr;
+mod rdpeai;
+mod rdpecam;
+mod rdpei;
+mod rdpel;
+mod rdpemt;
+mod rdpeudp;
+mod rdpeusb;
+mod rdpsnd;
+mod server;
+mod server_name;
+mod session;
+mod str_types;
+mod svc;
+mod usb;

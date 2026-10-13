@@ -374,6 +374,52 @@
     </div>
   </div>
 
+    <!-- 新建 SSH 会话表单 -->
+  <div id="ssh-new-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2 data-i18n="sshNewTitle">新建 SSH 会话</h2>
+      <label>
+        <span data-i18n="sshNewHost">主机</span>
+        <input id="ssh-new-host" type="text" placeholder="example.com" spellcheck="false" autocomplete="off" />
+      </label>
+      <label>
+        <span data-i18n="sshNewPort">端口</span>
+        <input id="ssh-new-port" type="number" value="22" min="1" max="65535" />
+      </label>
+      <label>
+        <span data-i18n="sshNewUser">用户名</span>
+        <input id="ssh-new-user" type="text" placeholder="root" spellcheck="false" autocomplete="off" />
+      </label>
+      <label class="stacked">
+        <span data-i18n="authMethodTitle">认证方式</span>
+        <select id="ssh-new-auth">
+          <option value="password" data-i18n="authPassword">密码</option>
+          <option value="key" data-i18n="authKey">密钥</option>
+        </select>
+      </label>
+      <label id="ssh-new-password-row">
+        <span data-i18n="sshNewPassword">密码</span>
+        <input id="ssh-new-password" type="password" autocomplete="off" />
+      </label>
+      <label id="ssh-new-key-path-row" class="hidden">
+        <span data-i18n="sshNewKeyPath">私钥路径</span>
+        <input id="ssh-new-key-path" type="text" placeholder="C:\Users\me\.ssh\id_rsa" spellcheck="false" autocomplete="off" />
+      </label>
+      <label id="ssh-new-passphrase-row" class="hidden">
+        <span data-i18n="sshNewPassphrase">私钥口令</span>
+        <input id="ssh-new-passphrase" type="password" autocomplete="off" />
+      </label>
+      <label>
+        <span data-i18n="sshNewJump">跳板机（可空）</span>
+        <input id="ssh-new-jump" type="text" placeholder="user@host:22" spellcheck="false" autocomplete="off" />
+      </label>
+      <div class="modal-actions">
+        <button id="ssh-new-cancel" data-i18n="commonCancel">取消</button>
+        <button id="ssh-new-ok" class="primary" data-i18n="quickConnectConnect">连接</button>
+      </div>
+    </div>
+  </div>
+  
   <!-- 通用输入 / 确认 / 提示 -->
   <div id="prompt-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">

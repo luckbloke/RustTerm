@@ -236,6 +236,14 @@ const zh: Dict & typeof staticText = {
   tunnelFailed: ({ err }: { err: string }) => `隧道失败: ${err}`,
 
   // ---------- SSH 连接 ----------
+  sshNewTitle: '新建 SSH 会话',
+  sshNewHost: '主机',
+  sshNewPort: '端口',
+  sshNewUser: '用户名',
+  sshNewPassword: '密码',
+  sshNewKeyPath: '私钥路径',
+  sshNewPassphrase: '私钥口令',
+  sshNewJump: '跳板机（可空）',
   sshFormatError: '请使用 user@host:port 格式',
   sshPasswordTitle: 'SSH 密码',
   sshPasswordPrompt: ({ user, host }: { user: string; host: string }) => `请输入 ${user}@${host} 的密码：`,
@@ -349,6 +357,8 @@ const zh: Dict & typeof staticText = {
   rdpErrorAuthentication: 'RDP：认证失败',
   rdpErrorSession: 'RDP：会话已结束',
   rdpErrorInternal: 'RDP：内部错误',
+  // 中文（放在 rdpErrorInternal 附近）
+  rdpStateCertificate: 'RDP：正在验证证书…',
 
   // VNC（新增）
   vncHostPrompt: 'VNC 服务器地址：',
@@ -674,6 +684,14 @@ const en: Dict & typeof staticText = {
   tunnelFailed: ({ err }: { err: string }) => `Tunnel failed: ${err}`,
 
   // ---------- SSH ----------
+  sshNewTitle: 'New SSH session',
+  sshNewHost: 'Host',
+  sshNewPort: 'Port',
+  sshNewUser: 'Username',
+  sshNewPassword: 'Password',
+  sshNewKeyPath: 'Private key path',
+  sshNewPassphrase: 'Key passphrase',
+  sshNewJump: 'Jump host (optional)',
   sshFormatError: 'Use the user@host:port format',
   sshPasswordTitle: 'SSH password',
   sshPasswordPrompt: ({ user, host }: { user: string; host: string }) => `Password for ${user}@${host}:`,
@@ -786,6 +804,8 @@ const en: Dict & typeof staticText = {
   rdpErrorAuthentication: 'RDP: authentication failed',
   rdpErrorSession: 'RDP: session ended',
   rdpErrorInternal: 'RDP: internal error',
+  // 英文
+  rdpStateCertificate: 'RDP: verifying certificate…',
 
   vncHostPrompt: 'VNC server address:',
   vncPortPrompt: 'Port (default 5900):',

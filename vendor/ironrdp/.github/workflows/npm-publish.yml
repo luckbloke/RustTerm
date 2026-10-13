@@ -1,0 +1,232 @@
+name: Publish npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Dry run'
+        required: true
+        type: boolean
+        default: true
+  schedule:
+    - cron: '48 3 * * 1' # 3:48 AM UTC every Monday
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      dry-run: ${{ steps.get-dry-run.outputs.dry-run }}
+
+    steps:
+      - name: Get dry run
+        id: get-dry-run
+        run: |
+          $IsDryRun = '${{ github.event.inputs.dry-run }}' -Eq 'true' -Or '${{ github.event_name }}' -Eq 'schedule'
+
+          if ($IsDryRun) {
+            echo "dry-run=true" >> $Env:GITHUB_OUTPUT
+          } else {
+            echo "dry-run=false" >> $Env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
+  build:
+    name: Build package [${{matrix.library}}]
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        library:
+          - iron-remote-desktop
+          - iron-remote-desktop-rdp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        shell: bash
+
+      - name: Install dependencies
+        run: |
+          Set-Location -Path "./web-client/${{matrix.library}}/"
+          npm install
+        shell: pwsh
+
+      - name: Build package
+        run: |
+          Set-PSDebug -Trace 1
+
+          Set-Location -Path "./web-client/${{matrix.library}}/"
+          npm run build
+          Set-Location -Path ./dist
+          npm pack
+        shell: pwsh
+
+      - name: Harvest package
+        run: |
+          Set-PSDebug -Trace 1
+
+          New-Item -ItemType "directory" -Path . -Name "npm-packages"
+          Get-ChildItem -Path ./web-client/ -Recurse *.tgz | ForEach { Copy-Item $_ "./npm-packages" }
+        shell: pwsh
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-${{matrix.library}}
+          path: npm-packages/*.tgz
+
+  npm-merge:
+    name: Merge artifacts
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Merge Artifacts
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: npm
+          pattern: npm-*
+          delete-merged: true
+
+  publish:
+    name: Publish package
+    environment: publish
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: [preflight, npm-merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Download NPM packages artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: npm
+          path: npm-packages
+
+      - name: Publish
+        run: |
+          Set-PSDebug -Trace 1
+
+          $isDryRun = '${{ needs.preflight.outputs.dry-run }}' -Eq 'true'
+
+          $files = Get-ChildItem -Recurse npm-packages/*.tgz
+
+          foreach ($file in $files) {
+            Write-Host "Processing $($file.Name)..."
+
+            $match = [regex]::Match($file.Name, '^(?<name>.+)-(?<version>\d+\.\d+\.\d+)\.tgz$')
+
+            if (-not $match.Success) {
+              Write-Host "Unable to parse package name/version from $($file.Name), skipping."
+              continue
+            }
+
+            $pkgName = $match.Groups['name'].Value
+
+            # Normalize scope for npm lookups: "devolutions-foo" => "@devolutions/foo"
+            if ($pkgName -like 'devolutions-*') {
+              $scopedName = "@devolutions/$($pkgName.Substring(12))"
+            } else {
+              $scopedName = $pkgName
+            }
+
+            $pkgVersion = $match.Groups['version'].Value
+
+            # Check if this version exists on npm; exit code 0 means it does.
+            npm view "$scopedName@$pkgVersion" | Out-Null
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "$scopedName@$pkgVersion already exists on npm; skipping publish."
+              continue
+            }
+
+            $publishCmd = @('npm','publish',"$file",'--access=public')
+
+            if ($isDryRun) {
+              $publishCmd += '--dry-run'
+            }
+
+            $publishCmd = $publishCmd -Join ' '
+            Invoke-Expression $publishCmd
+          }
+        shell: pwsh
+
+      - name: Create version tags
+        if: ${{ needs.preflight.outputs.dry-run == 'false' }}
+        run: |
+          set -e
+
+          git fetch --tags
+
+          for file in npm-packages/*.tgz; do
+            base=$(basename "$file" .tgz)
+
+            # Split base at the last hyphen to separate name and version
+            pkg=${base%-*}
+            # Strip the unscoped prefix introduced by `npm pack` for @devolutions/<pkg>.
+            pkg=${pkg#devolutions-}
+
+            version=${base##*-}
+
+            tag="npm-${pkg}-v${version}"
+
+            if git rev-parse "$tag" >/dev/null 2>&1; then
+              echo "Tag $tag already exists; skipping."
+              continue
+            fi
+
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "$tag"
+          done
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: github-actions
+          GIT_AUTHOR_EMAIL: github-actions@github.com
+          GIT_COMMITTER_NAME: github-actions
+          GIT_COMMITTER_EMAIL: github-actions@github.com
+
+  notify:
+    name: Notify failure
+    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_ARCHITECTURE }}
+      SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+    steps:
+      - name: Send slack notification
+        id: slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*${{ github.repository }}* :fire::fire::fire::fire::fire: \n The scheduled build for *${{ github.repository }}* is <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|broken>"
+                  }
+                }
+              ]
+            }

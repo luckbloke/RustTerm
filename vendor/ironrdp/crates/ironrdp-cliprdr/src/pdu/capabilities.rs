@@ -1,0 +1,300 @@
+use bitflags::bitflags;
+use ironrdp_core::{
+    Decode, DecodeResult, Encode, EncodeResult, ReadCursor, WriteCursor, cast_int, cast_length, ensure_fixed_part_size,
+    ensure_size, invalid_field_err,
+};
+use ironrdp_pdu::{impl_pdu_pod, read_padding, write_padding};
+
+use crate::pdu::PartialHeader;
+
+/// Represents `CLIPRDR_CAPS`
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Capabilities {
+    pub capabilities: Vec<CapabilitySet>,
+}
+
+impl_pdu_pod!(Capabilities);
+
+impl Capabilities {
+    const NAME: &'static str = "CLIPRDR_CAPS";
+    const FIXED_PART_SIZE: usize = 2 /* capsLen */ + 2 /* padding */;
+
+    fn inner_size(&self) -> usize {
+        Self::FIXED_PART_SIZE + self.capabilities.iter().map(|c| c.size()).sum::<usize>()
+    }
+
+    pub fn new(version: ClipboardProtocolVersion, general_flags: ClipboardGeneralCapabilityFlags) -> Self {
+        let capabilities = vec![CapabilitySet::General(GeneralCapabilitySet { version, general_flags })];
+
+        Self { capabilities }
+    }
+
+    pub fn flags(&self) -> ClipboardGeneralCapabilityFlags {
+        // There is only one capability set in the capabilities field in current CLIPRDR version
+        self.capabilities
+            .first()
+            .map(|set| set.general().general_flags)
+            .unwrap_or_else(ClipboardGeneralCapabilityFlags::empty)
+    }
+
+    pub fn version(&self) -> ClipboardProtocolVersion {
+        self.capabilities
+            .first()
+            .map(|set| set.general().version)
+            .unwrap_or(ClipboardProtocolVersion::V1)
+    }
+
+    pub fn downgrade(&mut self, server_caps: &Self) {
+        let client_flags = self.flags();
+        let server_flags = server_caps.flags();
+
+        let flags = client_flags & server_flags;
+        let version = self.version().downgrade(server_caps.version());
+
+        self.capabilities = vec![CapabilitySet::General(GeneralCapabilitySet {
+            version,
+            general_flags: flags,
+        })];
+    }
+}
+
+impl Encode for Capabilities {
+    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        let header = PartialHeader::new(cast_int!("dataLen", self.inner_size(), in: dst)?);
+        header.encode(dst)?;
+
+        ensure_size!(in: dst, size: self.inner_size());
+
+        dst.write_u16(cast_length!(Self::NAME, "cCapabilitiesSets", self.capabilities.len(), in: dst)?);
+        write_padding!(dst, 2);
+
+        for capability in &self.capabilities {
+            capability.encode(dst)?;
+        }
+
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn size(&self) -> usize {
+        self.inner_size() + PartialHeader::SIZE
+    }
+}
+
+impl<'de> Decode<'de> for Capabilities {
+    fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
+        let _header = PartialHeader::decode(src)?;
+
+        ensure_fixed_part_size!(in: src);
+        let capabilities_count = src.read_u16();
+        read_padding!(src, 2);
+
+        let mut capabilities = Vec::with_capacity(usize::from(capabilities_count));
+
+        for _ in 0..capabilities_count {
+            let caps = CapabilitySet::decode(src)?;
+            capabilities.push(caps);
+        }
+
+        Ok(Self { capabilities })
+    }
+}
+
+/// Represents `CLIPRDR_CAPS_SET`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilitySet {
+    General(GeneralCapabilitySet),
+}
+
+impl_pdu_pod!(CapabilitySet);
+
+impl CapabilitySet {
+    const NAME: &'static str = "CLIPRDR_CAPS_SET";
+    const FIXED_PART_SIZE: usize = 2 /* type */ + 2 /* len */;
+
+    const CAPSTYPE_GENERAL: u16 = 0x0001;
+
+    pub fn general(&self) -> &GeneralCapabilitySet {
+        match self {
+            Self::General(value) => value,
+        }
+    }
+}
+
+impl From<GeneralCapabilitySet> for CapabilitySet {
+    fn from(value: GeneralCapabilitySet) -> Self {
+        Self::General(value)
+    }
+}
+
+impl Encode for CapabilitySet {
+    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        let (caps, length) = match self {
+            Self::General(value) => {
+                let length = value.size() + Self::FIXED_PART_SIZE;
+                (value, length)
+            }
+        };
+
+        ensure_size!(in: dst, size: length);
+        dst.write_u16(Self::CAPSTYPE_GENERAL);
+        dst.write_u16(cast_int!("lengthCapability", length, in: dst)?);
+        caps.encode(dst)
+    }
+
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn size(&self) -> usize {
+        let variable_size = match self {
+            Self::General(value) => value.size(),
+        };
+
+        Self::FIXED_PART_SIZE + variable_size
+    }
+}
+
+impl<'de> Decode<'de> for CapabilitySet {
+    fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
+        ensure_fixed_part_size!(in: src);
+
+        let caps_type = src.read_u16();
+        let _length = src.read_u16();
+
+        match caps_type {
+            Self::CAPSTYPE_GENERAL => {
+                let general = GeneralCapabilitySet::decode(src)?;
+                Ok(Self::General(general))
+            }
+            _ => Err(invalid_field_err!( "capabilitySetType",
+                "invalid clipboard capability set type", in: src)),
+        }
+    }
+}
+
+/// Represents `CLIPRDR_GENERAL_CAPABILITY` without header
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneralCapabilitySet {
+    pub version: ClipboardProtocolVersion,
+    pub general_flags: ClipboardGeneralCapabilityFlags,
+}
+
+impl GeneralCapabilitySet {
+    const NAME: &'static str = "CLIPRDR_GENERAL_CAPABILITY";
+    const FIXED_PART_SIZE: usize = 4 /* version */ + 4 /* flags */;
+}
+
+impl Encode for GeneralCapabilitySet {
+    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        ensure_fixed_part_size!(in: dst);
+
+        dst.write_u32(self.version.into());
+        dst.write_u32(self.general_flags.bits());
+
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn size(&self) -> usize {
+        Self::FIXED_PART_SIZE
+    }
+}
+
+impl<'de> Decode<'de> for GeneralCapabilitySet {
+    fn decode(src: &mut ReadCursor<'de>) -> DecodeResult<Self> {
+        ensure_fixed_part_size!(in: src);
+
+        let version: ClipboardProtocolVersion = src.read_u32().into();
+        let general_flags = ClipboardGeneralCapabilityFlags::from_bits_retain(src.read_u32());
+
+        Ok(Self { version, general_flags })
+    }
+}
+
+/// Specifies the `Remote Desktop Protocol: Clipboard Virtual Channel Extension` version number.
+///
+/// Per [MS-RDPECLIP] 2.2.2.1.1.1, this field is for informational purposes and MUST NOT be
+/// used to make protocol capability decisions. The actual features supported are specified
+/// via [`ClipboardGeneralCapabilityFlags`].
+///
+/// Unknown version values are preserved as [`Unknown`](Self::Unknown) to avoid rejecting
+/// Capabilities PDUs from future protocol revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardProtocolVersion {
+    V1,
+    V2,
+    /// A version value not recognized by this implementation.
+    /// Preserved for round-trip encoding fidelity.
+    Unknown(u32),
+}
+
+impl ClipboardProtocolVersion {
+    const VERSION_VALUE_V1: u32 = 0x0000_0001;
+    const VERSION_VALUE_V2: u32 = 0x0000_0002;
+
+    #[must_use]
+    pub fn downgrade(self, other: Self) -> Self {
+        if self != other {
+            return Self::V1;
+        }
+        self
+    }
+}
+
+impl From<ClipboardProtocolVersion> for u32 {
+    fn from(version: ClipboardProtocolVersion) -> Self {
+        match version {
+            ClipboardProtocolVersion::V1 => ClipboardProtocolVersion::VERSION_VALUE_V1,
+            ClipboardProtocolVersion::V2 => ClipboardProtocolVersion::VERSION_VALUE_V2,
+            ClipboardProtocolVersion::Unknown(value) => value,
+        }
+    }
+}
+
+impl From<u32> for ClipboardProtocolVersion {
+    fn from(value: u32) -> Self {
+        match value {
+            Self::VERSION_VALUE_V1 => Self::V1,
+            Self::VERSION_VALUE_V2 => Self::V2,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct ClipboardGeneralCapabilityFlags: u32 {
+        /// The Long Format Name variant of the Format List PDU is supported
+        /// for exchanging updated format names. If this flag is not set, the
+        /// Short Format Name variant MUST be used. If this flag is set by both
+        /// protocol endpoints, then the Long Format Name variant MUST be
+        /// used.
+        const USE_LONG_FORMAT_NAMES = 0x0000_0002;
+        /// File copy and paste using stream-based operations are supported
+        /// using the File Contents Request PDU and File Contents Response
+        /// PDU.
+        const STREAM_FILECLIP_ENABLED = 0x0000_0004;
+        /// Indicates that any description of files to copy and paste MUST NOT
+        /// include the source path of the files.
+        const FILECLIP_NO_FILE_PATHS = 0x0000_0008;
+        /// Locking and unlocking of File Stream data on the clipboard is
+        /// supported using the Lock Clipboard Data PDU and Unlock Clipboard
+        /// Data PDU.
+        const CAN_LOCK_CLIPDATA = 0x0000_0010;
+        /// Indicates support for transferring files that are larger than
+        /// 4,294,967,295 bytes in size. If this flag is not set, then only files of
+        /// size less than or equal to 4,294,967,295 bytes can be exchanged
+        /// using the File Contents Request PDU and File Contents
+        /// Response PDU.
+        const HUGE_FILE_SUPPORT_ENABLED = 0x0000_0020;
+
+        const _ = !0;
+    }
+}

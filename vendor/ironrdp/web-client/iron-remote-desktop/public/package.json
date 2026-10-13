@@ -1,0 +1,29 @@
+{
+  "name": "@devolutions/iron-remote-desktop",
+  "author": "Nicolas Girot",
+  "email": "ngirot@devolutions.net",
+  "contributors": [
+    "Benoit Cortier",
+    "Irving Ou",
+    "Vladislav Nikonov",
+    "Zacharia Ellaham",
+    "Alexandr Yusuk"
+  ],
+  "description": "Backend-agnostic Web Component for remote desktop protocols",
+  "version": "0.11.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Devolutions/IronRDP.git"
+  },
+  "homepage": "https://github.com/Devolutions/IronRDP",
+  "bugs": {
+    "url": "https://github.com/Devolutions/IronRDP/issues"
+  },
+  "license": "MIT OR Apache-2.0",
+  "main": "iron-remote-desktop.js",
+  "types": "index.d.ts",
+  "files": [
+    "iron-remote-desktop.js",
+    "index.d.ts"
+  ]
+}

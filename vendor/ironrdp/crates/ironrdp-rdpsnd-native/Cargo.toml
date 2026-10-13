@@ -1,0 +1,39 @@
+[package]
+name = "ironrdp-rdpsnd-native"
+version = "0.7.0"
+description = "Native RDPSND playback and optional MS-RDPEAI capture backends for IronRDP"
+edition.workspace = true
+rust-version = "1.94"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = ["opus"]
+opus = ["dep:opus2", "dep:bytemuck"]
+# MS-RDPEAI microphone capture backend (CPAL input + ironrdp-rdpeai handler).
+capture = ["dep:ironrdp-rdpeai"]
+
+[dependencies]
+bytemuck = { version = "1.24", optional = true }
+cpal = "0.17"
+ironrdp-error = { path = "../ironrdp-error", version = "0.2", features = ["std"] } # public
+ironrdp-rdpeai = { path = "../ironrdp-rdpeai", version = "0.1", optional = true } # public
+ironrdp-rdpsnd = { path = "../ironrdp-rdpsnd", version = "0.9" } # public
+opus2 = { version = "0.4", optional = true, features = ["bundled"] }
+ringbuf = "0.5"
+tracing = { version = "0.1", features = ["log"] }
+
+[dev-dependencies]
+anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

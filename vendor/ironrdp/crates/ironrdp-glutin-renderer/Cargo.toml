@@ -1,0 +1,28 @@
+[package]
+name = "ironrdp-glutin-renderer"
+version = "0.1.0"
+readme = "README.md"
+description = "`glutin` primitives for OpenGL rendering"
+edition.workspace = true
+rust-version = "1.94"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["openh264"]
+openh264 = ["dep:openh264"]
+
+[dependencies]
+ironrdp.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+glow = "0.12"
+glutin = { version = "0.29" }
+openh264 = { version = "0.6", optional = true, default-features = false, features = ["libloading"] }
+
+[lints]
+workspace = true

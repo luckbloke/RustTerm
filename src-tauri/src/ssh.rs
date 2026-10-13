@@ -1,7 +1,7 @@
 use crate::hostkey::{describe_failure, HostKeyChecker, HostKeyPolicy};
 use crate::sftp::SftpHandle;
 use anyhow::Result;
-use russh::client::{self, Handle};
+use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
 use russh::{Channel, ChannelMsg};
 use std::sync::{Arc, Mutex};
@@ -49,7 +49,6 @@ where
 
         // 1. 旧 KEX：DH group1 / group14 (SHA-1)
         //    把它们追加到末尾，现代算法优先，旧算法兜底
-        // kex
         let mut kex: Vec<russh::kex::Name> = p.kex.iter().copied().collect();
         kex.push(russh::kex::DH_G1_SHA1);
         kex.push(russh::kex::DH_G14_SHA1);
@@ -69,9 +68,7 @@ where
         mac.push(russh::mac::HMAC_SHA1);
         p.mac = Cow::Owned(mac);
 
-
         // 4. 旧主机密钥算法：ssh-rsa (SHA-1)
-        // key —— 用 cloned 而不是 copied
         let mut key: Vec<russh::keys::Algorithm> = p.key.iter().cloned().collect();
         key.push(russh::keys::Algorithm::Rsa { hash: None }); // None = SHA-1
         p.key = Cow::Owned(key);
@@ -100,6 +97,60 @@ fn connection_error(
 ) -> anyhow::Error {
     let message = describe_failure(failure, || format!("connect-failed:{host}:{port}"));
     anyhow::anyhow!("{message} ({e})")
+}
+
+/// 尝试多种认证方式，直到成功或全部失败。
+///
+/// 顺序：
+/// 1. password——现代服务器默认
+/// 2. keyboard-interactive——老服务器 / `PasswordAuthentication no` 但
+///    `KbdInteractiveAuthentication yes` 时，PAM 把密码转发到键盘交互
+///
+/// 服务器 `sshd_config` 里 `PasswordAuthentication no` 时，
+/// password 会被直接拒绝，必须 fallback 到 keyboard-interactive。
+async fn authenticate_with_fallback(
+    handle: &mut Handle<HostKeyChecker>,
+    user: &str,
+    password: &str,
+) -> Result<()> {
+    // 1. 先试 password
+    let auth = handle.authenticate_password(user, password).await?;
+    if auth.success() {
+        return Ok(());
+    }
+    eprintln!("[ssh] password 认证失败: {:?}，尝试 keyboard-interactive", auth);
+
+    // 2. keyboard-interactive
+    //    服务器会发一个 InfoRequest，通常是 "Password: " 提示，
+    //    我们把密码作为响应发回去。
+    let resp = handle
+        .authenticate_keyboard_interactive_start(user, None::<String>)
+        .await?;
+
+    match resp {
+        KeyboardInteractiveAuthResponse::Success => Ok(()),
+        KeyboardInteractiveAuthResponse::Failure { .. } => {
+            anyhow::bail!("auth-failed");
+        }
+        KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+            // 服务器给 N 个提示，我们全都回同一个密码。
+            // PAM 场景通常只有一个 "Password: " 提示。
+            let responses = vec![password.to_string(); prompts.len()];
+            let resp = handle
+                .authenticate_keyboard_interactive_respond(responses)
+                .await?;
+            match resp {
+                KeyboardInteractiveAuthResponse::Success => Ok(()),
+                KeyboardInteractiveAuthResponse::Failure { .. } => {
+                    anyhow::bail!("auth-failed");
+                }
+                KeyboardInteractiveAuthResponse::InfoRequest { .. } => {
+                    // 多轮交互（少见）。不支持，直接失败。
+                    anyhow::bail!("auth-failed: 服务器要求多轮键盘交互");
+                }
+            }
+        }
+    }
 }
 
 async fn open_shell_and_sftp(
@@ -159,8 +210,7 @@ pub async fn connect(
     let mut handle = connect_target(policy, target, host, port, &failure)
         .await
         .map_err(|e| connection_error(host, port, e, &failure))?;
-    let auth = handle.authenticate_password(user, password).await?;
-    if !auth.success() { anyhow::bail!("auth-failed"); }
+    authenticate_with_fallback(&mut handle, user, password).await?;
     open_shell_and_sftp(app, id, handle, cols, rows).await
 }
 
@@ -201,8 +251,9 @@ pub async fn connect_jump(
     let mut jump = connect_target(policy, jump_stream, jump_host, jump_port, &jump_failure)
         .await
         .map_err(|e| connection_error(jump_host, jump_port, e, &jump_failure))?;
-    let auth = jump.authenticate_password(jump_user, jump_password).await?;
-    if !auth.success() { anyhow::bail!("jump-auth-failed"); }
+    authenticate_with_fallback(&mut jump, jump_user, jump_password)
+        .await
+        .map_err(|_| anyhow::anyhow!("jump-auth-failed"))?;
     let jump = Arc::new(jump);
 
     // 2. 通过跳板机开 direct-tcpip 通道到目标主机
@@ -215,8 +266,9 @@ pub async fn connect_jump(
     let mut target = connect_target(policy, chan.into_stream(), host, port, &target_failure)
         .await
         .map_err(|e| connection_error(host, port, e, &target_failure))?;
-    let auth = target.authenticate_password(user, password).await?;
-    if !auth.success() { anyhow::bail!("target-auth-failed"); }
+    authenticate_with_fallback(&mut target, user, password)
+        .await
+        .map_err(|_| anyhow::anyhow!("target-auth-failed"))?;
 
     open_shell_and_sftp(app, id, target, cols, rows).await
 }

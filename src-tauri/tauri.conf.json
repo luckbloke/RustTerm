@@ -20,8 +20,9 @@
         "devtools": true
       }
     ],
-    "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:",
+      "capabilities": ["default"]
     }
   },
   "bundle": {

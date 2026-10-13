@@ -10,6 +10,8 @@ mod rdp;
 mod spice;
 mod xserver;
 mod ai;
+mod storage;
+mod rdp_clipboard;
 
 use hostkey::HostKeyPolicy;
 use serde::{Deserialize, Serialize};
@@ -91,12 +93,12 @@ fn hide_console(_cmd: &mut Command) {}
 pub struct AppState {
     pub sessions: Mutex<HashMap<String, pty::PtyHandle>>,
     pub ssh_sessions: Mutex<HashMap<String, ssh::SshHandle>>,
-    pub vnc_sessions: Mutex<HashMap<String, vnc::VncHandle>>,
+    pub vnc_manager: Arc<vnc::VncSessionManager>,
     pub rdp_sessions: Mutex<HashMap<String, rdp::RdpHandle>>,
     pub spice_sessions: Mutex<HashMap<String, spice::SpiceHandle>>,
     pub cancel_flags: Mutex<HashMap<String, Arc<sftp::TransferCancel>>>,
-    /// 主机密钥校验策略，由前端持久化后同步进来。
     pub host_key_policy: Mutex<HostKeyPolicy>,
+    pub rdp_pending_certificates: rdp::RdpCertificatePendingMap,
 }
 
 #[tauri::command]
@@ -108,56 +110,64 @@ async fn vnc_connect(
     password: String,
     frame_channel: Channel<InvokeResponseBody>,
 ) -> Result<String, String> {
-    let id = format!("vnc-{}", uuid_like());
-    eprintln!("[vnc_connect] 开始: host={host} port={port} sid={id}");
-
-    match vnc::connect(app, id.clone(), &host, port, &password, frame_channel).await {
-        Ok(handle) => {
-            eprintln!("[vnc_connect] 成功: sid={id}");
-            state.vnc_sessions.lock().unwrap().insert(id.clone(), handle);
-            Ok(id)
-        }
-        Err(e) => {
-            eprintln!("[vnc_connect] 失败: {e:?}");
-            for cause in e.chain() {
-                eprintln!("    - {cause}");
-            }
-            Err(format!("{e}"))
-        }
-    }
+    let config = vnc::load_saved_vnc_config(host, port, password);
+    let id = config.session_id.clone();
+    state.vnc_manager.create_session(app, config).await.map_err(|e| e.to_string())?;
+    state.vnc_manager.attach_frame_channel(&id, frame_channel).await.map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 #[tauri::command]
-fn vnc_send_key(
-    state: tauri::State<AppState>,
+async fn vnc_send_input(
+    state: tauri::State<'_, AppState>,
     session_id: String,
-    keysym: u32,
-    down: bool,
+    events: Vec<vnc::VncInputEvent>,
 ) -> Result<(), String> {
-    let map = state.vnc_sessions.lock().unwrap();
-    let handle = map.get(&session_id).ok_or("vnc session not found")?;
-    handle.send_key(keysym, down).map_err(|e| e.to_string())
+    state.vnc_manager.send_input(&session_id, events).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn vnc_send_pointer(
-    state: tauri::State<AppState>,
+async fn vnc_set_clipboard_text(
+    state: tauri::State<'_, AppState>,
     session_id: String,
-    x: u16,
-    y: u16,
-    buttons: u8,
+    text: String,
 ) -> Result<(), String> {
-    let map = state.vnc_sessions.lock().unwrap();
-    let handle = map.get(&session_id).ok_or("vnc session not found")?;
-    handle.send_pointer(x, y, buttons).map_err(|e| e.to_string())
+    state.vnc_manager.set_clipboard_text(&session_id, text).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn vnc_close(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
-    if let Some(handle) = state.vnc_sessions.lock().unwrap().remove(&session_id) {
-        handle.close();
-    }
-    Ok(())
+async fn vnc_respond_server_key(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    accepted: bool,
+) -> Result<(), String> {
+    state.vnc_manager.respond_server_key(&request_id, accepted).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vnc_attach_frame_channel(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    frame_channel: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    state.vnc_manager.attach_frame_channel(&session_id, frame_channel).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vnc_detach_frame_channel(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state.vnc_manager.detach_frame_channel(&session_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vnc_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state.vnc_manager.close(&app, &session_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -170,6 +180,10 @@ async fn rdp_connect(
     password: String,
     width: u16,
     height: u16,
+    display_mode: Option<String>,
+    color_depth: Option<u8>,
+    certificate_policy: Option<String>,
+    clipboard_mode: Option<String>,
     frame_channel: Channel<InvokeResponseBody>,
 ) -> Result<String, String> {
     let id = format!("rdp-{}", uuid_like());
@@ -180,18 +194,77 @@ async fn rdp_connect(
         id.clone(),
         host,
         port,
-        String::new(),         // domain 留空
+        String::new(),
         username,
         password,
         width,
         height,
+        display_mode.unwrap_or_else(|| "fit-window".to_string()),
+        color_depth.unwrap_or(32),
+        certificate_policy.unwrap_or_else(|| "prompt".to_string()),
+        clipboard_mode.unwrap_or_else(|| "text-and-files".to_string()),
         frame_channel,
+        state.rdp_pending_certificates.clone(),
     )
     .await
     .map_err(|e| e.to_string())?;
 
     state.rdp_sessions.lock().unwrap().insert(id.clone(), handle);
     Ok(id)
+}
+
+#[tauri::command]
+async fn rdp_respond_certificate(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    accepted: bool,
+    remember: bool,
+) -> Result<(), String> {
+    rdp::respond_certificate(
+        &state.rdp_pending_certificates,
+        &request_id,
+        accepted,
+        remember,
+    )
+    .await
+}
+
+#[tauri::command]
+fn rdp_list_known_hosts() -> Result<Vec<storage::RdpKnownHost>, String> {
+    storage::list_rdp_known_hosts()
+}
+
+#[tauri::command]
+fn rdp_remove_known_host(host: String, port: u16) -> Result<(), String> {
+    storage::remove_rdp_known_host(&host, port)
+}
+
+#[tauri::command]
+fn rdp_known_hosts_file() -> Option<String> {
+    storage::rdp_known_hosts_path()
+}
+
+#[tauri::command]
+fn rdp_resize(
+    state: tauri::State<AppState>,
+    session_id: String,
+    width: u16,
+    height: u16,
+) -> Result<(), String> {
+    let map = state.rdp_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("rdp session not found")?;
+    handle.resize(width, height).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rdp_set_clipboard_text(
+    state: tauri::State<AppState>,
+    session_id: String,
+    text: String,
+) -> Result<(), String> {
+    let map = state.rdp_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("rdp session not found")?;
+    handle.set_clipboard_text(text).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -224,7 +297,7 @@ fn rdp_send_key(
 fn rdp_send_input_batch(
     state: tauri::State<AppState>,
     session_id: String,
-    events: Vec<serde_json::Value>,
+    events: Vec<rdp::RdpInputEvent>,
 ) -> Result<(), String> {
     let map = state.rdp_sessions.lock().unwrap();
     let handle = map.get(&session_id).ok_or("rdp session not found")?;
@@ -240,6 +313,31 @@ fn rdp_set_streaming(
     let map = state.rdp_sessions.lock().unwrap();
     let handle = map.get(&session_id).ok_or("rdp session not found")?;
     handle.set_streaming(paused).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rdp_attach_frame_channel(
+    state: tauri::State<AppState>,
+    session_id: String,
+    frame_channel: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    let map = state.rdp_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("rdp session not found")?;
+    handle
+        .attach_frame_channel(Some(frame_channel))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rdp_detach_frame_channel(
+    state: tauri::State<AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let map = state.rdp_sessions.lock().unwrap();
+    let handle = map.get(&session_id).ok_or("rdp session not found")?;
+    handle
+        .attach_frame_channel(None)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -670,7 +768,9 @@ fn save_session_full(
 
     // SSH 的 name 是 user@host；VNC/RDP 没有 user，用 host:port
     let name = if protocol == "ssh" {
-        format!("{user}@{host}")
+        // 带 port：否则同一主机不同端口的两个 SSH 会话在侧栏显示相同名称，
+        // 用户会以为"只保存了一个"。
+        format!("{user}@{host}:{port}")
     } else {
         format!("{host}:{port}")
     };
@@ -724,13 +824,24 @@ fn save_session_full(
 fn list_sessions() -> Vec<SavedSession> { load_sessions() }
 
 #[tauri::command]
-fn delete_session(host: String, port: u16, user: String) -> Result<(), String> {
+fn delete_session(
+    host: String,
+    port: u16,
+    user: String,
+    protocol: Option<String>,
+) -> Result<(), String> {
+    let protocol = protocol.unwrap_or_else(|| "ssh".to_string());
     let mut list = load_sessions();
     // 一并清掉凭据库里的密码，否则会留下再也访问不到的孤儿记录
-    if list.iter().any(|s| s.host == host && s.user == user && s.port == port && s.save_password) {
+    if list.iter().any(|s|
+        s.host == host && s.user == user && s.port == port
+        && s.protocol == protocol && s.save_password)
+    {
         let _ = secret::delete(&user, &host, port);
     }
-    list.retain(|s| !(s.host == host && s.user == user && s.port == port));
+    list.retain(|s| !(
+        s.host == host && s.user == user && s.port == port && s.protocol == protocol
+    ));
     store_sessions(&list);
     Ok(())
 }
@@ -1051,11 +1162,12 @@ pub fn run() {
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
             ssh_sessions: Mutex::new(HashMap::new()),
-            vnc_sessions: Mutex::new(HashMap::new()),
+            vnc_manager: Arc::new(vnc::VncSessionManager::new()),
             rdp_sessions: Mutex::new(HashMap::new()),
             spice_sessions: Mutex::new(HashMap::new()),
             cancel_flags: Mutex::new(HashMap::new()),
             host_key_policy: Mutex::new(HostKeyPolicy::default()),
+            rdp_pending_certificates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
         .manage(XServerState(StdMutex::new(None)))
         .manage(TunnelState(Mutex::new(Vec::new())))
@@ -1071,8 +1183,8 @@ pub fn run() {
             xserver_start, xserver_stop, xserver_status,xserver_get_config, xserver_save_config,
             tunnel_start, list_tunnels, remove_tunnel,
             telnet_connect, portscan::port_scan,portscan::cancel_scan,
-            vnc_connect, vnc_send_key, vnc_send_pointer, vnc_close,
-            rdp_connect, rdp_send_pointer, rdp_send_key, rdp_send_input_batch, rdp_set_streaming, rdp_close,
+            vnc_connect, vnc_send_input, vnc_set_clipboard_text,vnc_respond_server_key, vnc_attach_frame_channel, vnc_detach_frame_channel, vnc_close,
+            rdp_connect, rdp_send_pointer, rdp_send_key, rdp_send_input_batch,rdp_set_streaming, rdp_attach_frame_channel, rdp_detach_frame_channel,rdp_resize, rdp_respond_certificate, rdp_list_known_hosts, rdp_remove_known_host, rdp_known_hosts_file,rdp_set_clipboard_text,rdp_close,
             spice_connect, spice_send_key, spice_send_pointer,spice_send_motion, spice_close,
             path_exists, file_version, open_external, exit_app, set_menu_language,
             set_host_key_policy, get_host_key_policy, known_hosts_file,
