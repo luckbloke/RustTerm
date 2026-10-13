@@ -1,5 +1,6 @@
 //! 纯 Rust 的 VNC 客户端实现，基于 vnc-rs。
-
+#![allow(dead_code)]
+#![allow(unused_assignments)]
 use anyhow::Result;
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};

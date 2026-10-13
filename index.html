@@ -37,6 +37,12 @@
     <button class="tool-btn" data-action="find" data-i18n-title="findPlaceholder">
       <span class="icon" aria-hidden="true">🔍</span><span data-i18n="findPlaceholder"></span>
     </button>
+    <button class="tool-btn" data-action="local-file" data-i18n-title="tipLocalFile">
+      <span class="icon" aria-hidden="true">📁</span><span data-i18n="toolbarLocalFile"></span>
+    </button>
+    <button class="tool-btn" data-action="browser" data-i18n-title="tipBrowser">
+      <span class="icon" aria-hidden="true">🌐</span><span data-i18n="toolbarBrowser"></span>
+    </button>
     <button class="tool-btn" data-action="ai" data-i18n-title="tipAi">
       <span class="icon" aria-hidden="true">🤖</span><span data-i18n="toolbarAi"></span>
     </button>
@@ -91,6 +97,8 @@
           <div class="tree-item" data-tool="rdp" data-i18n="treeRDP"></div>
           <div class="tree-item" data-tool="vnc" data-i18n="treeVNC"></div>
           <div class="tree-item" data-tool="spice" data-i18n="treeSpice"></div>
+          <div class="tree-item" data-tool="local-file" data-i18n="treeLocalFile"></div>
+          <div class="tree-item" data-tool="browser" data-i18n="treeBrowser"></div>
         </div>
       </div>
       <div id="macros-panel" class="sidebar-panel hidden">
@@ -219,23 +227,55 @@
   </div>
 </div>
 
-  <!-- 设置 -->
+    <!-- 设置 -->
   <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-content">
+    <div class="modal-content settings-modal-content">
       <h2 data-i18n="settingsTitle"></h2>
-      <label><span data-i18n="settingsFontSize"></span><input id="set-fontsize" type="number" value="14" min="8" max="32" /></label>
-      <label><span data-i18n="settingsCursorBlink"></span><input id="set-cursor" type="checkbox" checked /></label>
-      <label><span data-i18n="settingsScrollback"></span><input id="set-scrollback" type="number" value="5000" min="100" /></label>
-      <label><span data-i18n="termMultiExecRow"></span><input id="set-multiexec" type="checkbox" /></label>
-      <label class="stacked">
-        <span data-i18n="settingsHostKey"></span>
-        <select id="set-hostkey">
-          <option value="strict" data-i18n="hostKeyStrict"></option>
-          <option value="accept-new" data-i18n="hostKeyAcceptNew"></option>
-          <option value="insecure" data-i18n="hostKeyInsecure"></option>
-        </select>
-      </label>
-      <p class="hint" id="hostkey-hint"></p>
+      <div class="settings-layout">
+        <nav class="settings-nav" role="tablist">
+          <button class="settings-nav-item active" data-settings-tab="terminal" data-i18n="settingsTabTerminal">终端</button>
+          <button class="settings-nav-item" data-settings-tab="hostkey" data-i18n="settingsTabHostKey">主机密钥</button>
+          <button class="settings-nav-item" data-settings-tab="local-terminal" data-i18n="settingsTabLocalTerminal">本地终端</button>
+        </nav>
+        <div class="settings-panels">
+          <section class="settings-panel active" data-settings-panel="terminal">
+            <label><span data-i18n="settingsFontSize"></span><input id="set-fontsize" type="number" value="14" min="8" max="32" /></label>
+            <label><span data-i18n="settingsCursorBlink"></span><input id="set-cursor" type="checkbox" checked /></label>
+            <label><span data-i18n="settingsScrollback"></span><input id="set-scrollback" type="number" value="5000" min="100" /></label>
+            <label><span data-i18n="termMultiExecRow"></span><input id="set-multiexec" type="checkbox" /></label>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="hostkey">
+            <label class="stacked">
+              <span data-i18n="settingsHostKey"></span>
+              <select id="set-hostkey">
+                <option value="strict" data-i18n="hostKeyStrict"></option>
+                <option value="accept-new" data-i18n="hostKeyAcceptNew"></option>
+                <option value="insecure" data-i18n="hostKeyInsecure"></option>
+              </select>
+            </label>
+            <p class="hint" id="hostkey-hint"></p>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="local-terminal">
+            <p class="modal-hint" data-i18n="terminalConfigHint">点「本地会话」时使用的程序。例如 powershell.exe、pwsh.exe、cmd.exe、wsl.exe。</p>
+            <div class="terminal-presets">
+              <button type="button" data-preset="powershell.exe|-NoLogo">PowerShell</button>
+              <button type="button" data-preset="pwsh.exe|-NoLogo">PowerShell Core</button>
+              <button type="button" data-preset="cmd.exe|">CMD</button>
+              <button type="button" data-preset="wsl.exe|">WSL</button>
+            </div>
+            <label class="stacked">
+              <span data-i18n="terminalProgram">程序路径</span>
+              <input id="terminal-program" type="text" spellcheck="false" autocomplete="off" />
+            </label>
+            <label class="stacked">
+              <span data-i18n="terminalArgs">参数（空格分隔）</span>
+              <input id="terminal-args" type="text" spellcheck="false" autocomplete="off" />
+            </label>
+          </section>
+        </div>
+      </div>
       <div class="modal-actions">
         <button id="set-cancel" data-i18n="commonCancel"></button>
         <button id="set-ok" class="primary" data-i18n="settingsSave"></button>
@@ -293,6 +333,7 @@
 
   <!-- AI 助手面板（浮动侧边，不是 modal） -->
   <div id="ai-panel" class="ai-panel hidden">
+    <div id="ai-resize-handle" class="ai-resize-handle" title="拖动调节宽度"></div>
     <div class="ai-header">
       <div class="ai-header-left">
         <strong data-i18n="aiTitle">AI 助手</strong>

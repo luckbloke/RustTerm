@@ -10,6 +10,8 @@
     "core:webview:allow-create-webview-window",
     "core:window:allow-set-fullscreen",
     "core:window:allow-close",
+    "core:window:allow-inner-position",
+    "core:window:allow-scale-factor",
     "shell:allow-execute",
     "shell:allow-spawn",
     "shell:allow-stdin-write",

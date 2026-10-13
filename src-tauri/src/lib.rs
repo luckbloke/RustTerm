@@ -12,6 +12,7 @@ mod xserver;
 mod ai;
 mod storage;
 mod rdp_clipboard;
+mod terminal_config;
 
 use hostkey::HostKeyPolicy;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,8 @@ use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{Manager, LogicalPosition, LogicalSize, WebviewUrl, WebviewWindowBuilder};
+use tauri::Url;
 
 #[tauri::command]
 async fn ai_chat(
@@ -99,6 +102,8 @@ pub struct AppState {
     pub cancel_flags: Mutex<HashMap<String, Arc<sftp::TransferCancel>>>,
     pub host_key_policy: Mutex<HostKeyPolicy>,
     pub rdp_pending_certificates: rdp::RdpCertificatePendingMap,
+    /// 浏览器 Webview 推送的页面文本缓存。key 是 webview label。
+    pub browser_texts: Mutex<HashMap<String, String>>,
 }
 
 #[tauri::command]
@@ -560,6 +565,500 @@ fn known_hosts_file() -> Option<String> {
     hostkey::known_hosts_path().map(|p| p.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn terminal_get_config() -> terminal_config::TerminalConfig {
+    terminal_config::load()
+}
+
+#[tauri::command]
+fn terminal_save_config(cfg: terminal_config::TerminalConfig) -> Result<(), String> {
+    terminal_config::save(&cfg)
+}
+
+// ---------- 本地文件浏览器 ----------
+
+#[derive(serde::Serialize)]
+struct LocalEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    /// Unix 时间戳（秒）
+    modified: Option<u64>,
+    hidden: bool,
+}
+
+/// 列出本地目录内容。`path` 为空时返回用户主目录。
+#[tauri::command]
+fn local_list_dir(path: String) -> Result<Vec<LocalEntry>, String> {
+    use std::fs;
+    use std::time::UNIX_EPOCH;
+
+    let target = if path.is_empty() {
+        directories::UserDirs::new()
+            .map(|d| d.home_dir().to_path_buf())
+            .ok_or("无法定位用户主目录")?
+    } else {
+        std::path::PathBuf::from(&path)
+    };
+
+    let mut entries = Vec::new();
+    let iter = fs::read_dir(&target).map_err(|e| format!("读取目录失败: {e}"))?;
+    for entry in iter {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let is_dir = meta.is_dir();
+        let size = if is_dir { 0 } else { meta.len() };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        // 隐藏文件：
+        // - Unix/macOS：以 "." 开头
+        // - Windows：带 FILE_ATTRIBUTE_HIDDEN 属性，或 "." 开头
+        let hidden = name.starts_with('.') || is_hidden(&meta);
+
+        entries.push(LocalEntry {
+            name,
+            path: entry.path().to_string_lossy().to_string(),
+            is_dir,
+            size,
+            modified,
+            hidden,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(entries)
+}
+
+/// 判断文件是否带 Windows 隐藏属性。
+#[cfg(windows)]
+fn is_hidden(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_HIDDEN = 0x2
+    meta.file_attributes() & 0x2 != 0
+}
+
+#[cfg(not(windows))]
+fn is_hidden(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// 返回用户主目录路径。
+#[tauri::command]
+fn local_home_dir() -> Result<String, String> {
+    directories::UserDirs::new()
+        .map(|d| d.home_dir().to_string_lossy().to_string())
+        .ok_or("无法定位用户主目录".to_string())
+}
+
+/// 用系统默认程序打开文件或文件夹。
+#[tauri::command]
+fn local_open(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // explorer.exe 打开文件会调用默认关联程序；
+        // 打开文件夹会打开资源管理器。不会解释 shell 元字符。
+        std::process::Command::new("explorer.exe")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 在系统文件管理器中定位文件（高亮显示）。
+#[tauri::command]
+fn local_reveal(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        // explorer /select,<path> 会在资源管理器中高亮该文件
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{path}"))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        // Linux 没有统一的 "reveal"，退化为打开父目录
+        let parent = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        std::process::Command::new("xdg-open")
+            .arg(&parent)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 重命名文件或目录。
+#[tauri::command]
+fn local_rename(old_path: String, new_name: String) -> Result<(), String> {
+    let old = std::path::Path::new(&old_path);
+    let parent = old.parent().ok_or("无法定位父目录")?;
+    let new = parent.join(&new_name);
+    if new.exists() {
+        return Err(format!("{new_name} 已存在"));
+    }
+    std::fs::rename(old, &new).map_err(|e| format!("重命名失败: {e}"))
+}
+
+/// 删除文件或目录（目录递归删除）。
+#[tauri::command]
+fn local_delete(path: String, is_dir: bool) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if is_dir {
+        std::fs::remove_dir_all(p).map_err(|e| format!("删除目录失败: {e}"))
+    } else {
+        std::fs::remove_file(p).map_err(|e| format!("删除文件失败: {e}"))
+    }
+}
+
+/// 移动文件或目录。
+#[tauri::command]
+fn local_move(from: String, to_dir: String) -> Result<(), String> {
+    let src = std::path::Path::new(&from);
+    let name = src.file_name().ok_or("源路径无文件名")?;
+    let dst = std::path::Path::new(&to_dir).join(name);
+    if dst.exists() {
+        return Err(format!("目标已存在: {}", dst.display()));
+    }
+    std::fs::rename(src, &dst).map_err(|e| format!("移动失败: {e}"))
+}
+
+/// 新建文件夹。
+#[tauri::command]
+fn local_mkdir(parent: String, name: String) -> Result<(), String> {
+    let target = std::path::Path::new(&parent).join(&name);
+    if target.exists() {
+        return Err(format!("{name} 已存在"));
+    }
+    std::fs::create_dir(&target).map_err(|e| format!("创建失败: {e}"))
+}
+
+/// 复制文件或目录（递归）。
+#[tauri::command]
+fn local_copy(from: String, to_dir: String) -> Result<(), String> {
+    let src = std::path::Path::new(&from);
+    let name = src.file_name().ok_or("源路径无文件名")?;
+    let dst = std::path::Path::new(&to_dir).join(name);
+    if dst.exists() {
+        return Err(format!("目标已存在: {}", dst.display()));
+    }
+    copy_recursive(src, &dst).map_err(|e| format!("复制失败: {e}"))
+}
+
+fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+// ---------- 内置浏览器（Webview 定位）----------
+/// 注入到每个浏览器 Webview 的初始化脚本。
+///
+/// 目标：
+/// 1. 探测页面里的 xterm.js 终端
+/// 2. 定期把终端文本推给 Rust 侧缓存
+/// 3. 兜底：如果没找到 xterm，就推 document.body.innerText
+///
+/// 探测顺序：
+/// - window.term（xterm 全局实例，部分站点会挂）
+/// - .xterm-rows（xterm 渲染后的 DOM 行）
+/// - document.body.innerText（兜底，拿整页文本）
+const BROWSER_CAPTURE_SCRIPT: &str = r#"
+(function () {
+  'use strict';
+
+  const PUSH_INTERVAL_MS = 2000;
+  const DETECT_INTERVAL_MS = 500;
+  const MAX_TEXT_LENGTH = 64 * 1024;   // 单次推送最多 64KB
+
+  // 从 Tauri 注入的元数据里拿当前 Webview 的 label
+  function currentLabel() {
+    try {
+      return window.__TAURI_INTERNALS__.metadata.currentWebview.label;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 推给 Rust 侧
+  function pushText(text) {
+    if (!text) return;
+    if (text.length > MAX_TEXT_LENGTH) {
+      text = text.slice(text.length - MAX_TEXT_LENGTH);
+    }
+    const label = currentLabel();
+    if (!label) return;
+    try {
+      window.__TAURI_INTERNALS__.invoke('browser_text_update', {
+        label: label,
+        text: text,
+      }).catch(function () { /* 忽略推送失败 */ });
+    } catch (e) { /* 忽略 */ }
+  }
+
+  // 从 xterm 全局实例读文本
+  function readXtermGlobal() {
+    try {
+      if (window.term && window.term.buffer && window.term.buffer.active) {
+        const buf = window.term.buffer.active;
+        let out = '';
+        for (let i = 0; i < buf.length; i++) {
+          const line = buf.getLine(i);
+          if (line) out += line.translateToString(true) + '\n';
+        }
+        return out;
+      }
+    } catch (e) { /* 忽略 */ }
+    return null;
+  }
+
+  // 从 xterm 渲染后的 DOM 读文本
+  function readXtermDom() {
+    try {
+      const rows = document.querySelector('.xterm-rows');
+      if (!rows) return null;
+      const lines = rows.querySelectorAll('div');
+      if (!lines.length) return null;
+      let out = '';
+      lines.forEach(function (line) {
+        out += (line.textContent || '') + '\n';
+      });
+      return out;
+    } catch (e) { /* 忽略 */ }
+    return null;
+  }
+
+  // 兜底：整页文本
+  function readBody() {
+    try {
+      return document.body ? (document.body.innerText || '') : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // 探测是否有 xterm 存在
+  let hasXterm = false;
+  const detectTimer = setInterval(function () {
+    if (readXtermGlobal() !== null || readXtermDom() !== null) {
+      hasXterm = true;
+      clearInterval(detectTimer);
+    }
+  }, DETECT_INTERVAL_MS);
+
+  // 定期推送
+  let lastHash = 0;
+  function hash(s) {
+    // 简单 hash，用于判断内容是否变化
+    let h = 0;
+    for (let i = 0; i < s.length; i++) {
+      h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    }
+    return h;
+  }
+
+  setInterval(function () {
+    let text = null;
+    if (hasXterm) {
+      text = readXtermGlobal();
+      if (text === null) text = readXtermDom();
+    }
+    if (text === null) {
+      // xterm 还没出现，或页面根本不是终端：推整页文本
+      text = readBody();
+    }
+    if (!text) return;
+    const h = hash(text);
+    if (h === lastHash) return;    // 内容没变，不推
+    lastHash = h;
+    pushText(text);
+  }, PUSH_INTERVAL_MS);
+})();
+"#;
+/// 打开一个浏览器 Webview，浮在主窗口上方。
+///
+/// 初始不可见，由前端调用 `browser_set_bounds` + `browser_set_visible` 定位后再显示。
+#[tauri::command]
+async fn browser_open(
+    app: tauri::AppHandle,
+    label: String,
+    url: String,
+) -> Result<(), String> {
+    if app.get_webview_window(&label).is_some() {
+        return Ok(());
+    }
+
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("URL 无效: {e}"))?;
+
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed))
+        .decorations(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .visible(false)
+        .initialization_script(BROWSER_CAPTURE_SCRIPT);
+
+    let builder = match app.get_webview_window("main") {
+        Some(main) => match builder.parent(&main) {
+            Ok(b) => b,
+            Err(_) => WebviewWindowBuilder::new(
+                &app,
+                &label,
+                WebviewUrl::External(
+                    tauri::Url::parse(&url).map_err(|e| format!("URL 无效: {e}"))?,
+                ),
+            )
+            .decorations(false)
+            .resizable(false)
+            .skip_taskbar(true)
+            .visible(false)
+            .initialization_script(BROWSER_CAPTURE_SCRIPT),
+        },
+        None => builder,
+    };
+
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置浏览器 Webview 的位置和尺寸。
+///
+/// 参数是**逻辑像素**（和 CSS 像素一致），Tauri 会按当前 DPI 换算成物理像素。
+#[tauri::command]
+async fn browser_set_bounds(
+    app: tauri::AppHandle,
+    label: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let Some(wv) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    wv.set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    wv.set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 显示或隐藏浏览器 Webview。
+#[tauri::command]
+async fn browser_set_visible(
+    app: tauri::AppHandle,
+    label: String,
+    visible: bool,
+) -> Result<(), String> {
+    let Some(wv) = app.get_webview_window(&label) else {
+        return Ok(());
+    };
+    if visible {
+        wv.show().map_err(|e| e.to_string())?;
+    } else {
+        wv.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 关闭浏览器 Webview。
+#[tauri::command]
+async fn browser_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    label: String,
+) -> Result<(), String> {
+    if let Some(wv) = app.get_webview_window(&label) {
+        wv.close().map_err(|e| e.to_string())?;
+    }
+    if let Ok(mut map) = state.browser_texts.lock() {
+        map.remove(&label);
+    }
+    Ok(())
+}
+
+/// 让浏览器 Webview 导航到新 URL。
+#[tauri::command]
+async fn browser_navigate(
+    app: tauri::AppHandle,
+    label: String,
+    url: String,
+) -> Result<(), String> {
+    let Some(wv) = app.get_webview_window(&label) else {
+        return Err(format!("browser {label} not found"));
+    };
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("URL 无效: {e}"))?;
+    wv.navigate(parsed).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 由浏览器 Webview 的初始化脚本调用，把页面文本推给 Rust 缓存。
+#[tauri::command]
+fn browser_text_update(
+    state: tauri::State<AppState>,
+    label: String,
+    text: String,
+) {
+    if let Ok(mut map) = state.browser_texts.lock() {
+        map.insert(label, text);
+    }
+}
+
+/// 供 AI 模块读取浏览器页面的当前文本。
+#[tauri::command]
+fn browser_read_text(
+    state: tauri::State<AppState>,
+    label: String,
+) -> Result<String, String> {
+    let map = state.browser_texts.lock().map_err(|e| e.to_string())?;
+    Ok(map.get(&label).cloned().unwrap_or_default())
+}
+
 /// 给 SSH 会话的远程 shell 写入本地 X server 的 DISPLAY。
 ///
 /// DISPLAY 必须取自已就绪的本地 X server 实例，而不是写死 `:1`：
@@ -768,7 +1267,9 @@ fn save_session_full(
 
     // SSH 的 name 是 user@host；VNC/RDP 没有 user，用 host:port
     let name = if protocol == "ssh" {
-        format!("{user}@{host}")
+        // 带 port：否则同一主机不同端口的两个 SSH 会话在侧栏显示相同名称，
+        // 用户会以为"只保存了一个"。
+        format!("{user}@{host}:{port}")
     } else {
         format!("{host}:{port}")
     };
@@ -822,13 +1323,24 @@ fn save_session_full(
 fn list_sessions() -> Vec<SavedSession> { load_sessions() }
 
 #[tauri::command]
-fn delete_session(host: String, port: u16, user: String) -> Result<(), String> {
+fn delete_session(
+    host: String,
+    port: u16,
+    user: String,
+    protocol: Option<String>,
+) -> Result<(), String> {
+    let protocol = protocol.unwrap_or_else(|| "ssh".to_string());
     let mut list = load_sessions();
     // 一并清掉凭据库里的密码，否则会留下再也访问不到的孤儿记录
-    if list.iter().any(|s| s.host == host && s.user == user && s.port == port && s.save_password) {
+    if list.iter().any(|s|
+        s.host == host && s.user == user && s.port == port
+        && s.protocol == protocol && s.save_password)
+    {
         let _ = secret::delete(&user, &host, port);
     }
-    list.retain(|s| !(s.host == host && s.user == user && s.port == port));
+    list.retain(|s| !(
+        s.host == host && s.user == user && s.port == port && s.protocol == protocol
+    ));
     store_sessions(&list);
     Ok(())
 }
@@ -1155,6 +1667,7 @@ pub fn run() {
             cancel_flags: Mutex::new(HashMap::new()),
             host_key_policy: Mutex::new(HostKeyPolicy::default()),
             rdp_pending_certificates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            browser_texts: Mutex::new(HashMap::new()),
         })
         .manage(XServerState(StdMutex::new(None)))
         .manage(TunnelState(Mutex::new(Vec::new())))
@@ -1174,7 +1687,9 @@ pub fn run() {
             rdp_connect, rdp_send_pointer, rdp_send_key, rdp_send_input_batch,rdp_set_streaming, rdp_attach_frame_channel, rdp_detach_frame_channel,rdp_resize, rdp_respond_certificate, rdp_list_known_hosts, rdp_remove_known_host, rdp_known_hosts_file,rdp_set_clipboard_text,rdp_close,
             spice_connect, spice_send_key, spice_send_pointer,spice_send_motion, spice_close,
             path_exists, file_version, open_external, exit_app, set_menu_language,
-            set_host_key_policy, get_host_key_policy, known_hosts_file,
+            set_host_key_policy, get_host_key_policy, known_hosts_file, terminal_get_config, terminal_save_config,
+            browser_open, browser_set_bounds, browser_set_visible,browser_close, browser_navigate,browser_text_update, browser_read_text,
+            local_list_dir, local_home_dir, local_open, local_reveal,local_rename, local_delete, local_move, local_mkdir,local_copy,
             ai_chat, ai_extract_commands, ai_is_dangerous,ai_is_write_command,ai_is_task_done,
         ])
         .setup(|app| {

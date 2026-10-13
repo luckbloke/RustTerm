@@ -16,7 +16,7 @@ use ironrdp::cliprdr::pdu::{
     ClipboardFileAttributes, ClipboardFormat, ClipboardFormatId, ClipboardFormatName,
     ClipboardGeneralCapabilityFlags, FileContentsFlags, FileContentsRequest,
     FileContentsResponse, FileDescriptor, FormatDataRequest, FormatDataResponse, LockDataId,
-    OwnedFormatDataResponse, PackedFileList, FORMAT_NAME_FILE_LIST,
+    OwnedFormatDataResponse, FORMAT_NAME_FILE_LIST,
 };
 use ironrdp::core::impl_as_any;
 use std::collections::{HashMap, HashSet, VecDeque};

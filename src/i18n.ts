@@ -306,6 +306,19 @@ const zh: Dict & typeof staticText = {
   scanNoResult: '（暂无开放端口）',
   scanInvalidTarget: '目标格式错误',
   scanInvalidPorts: '端口格式错误',
+  
+  toolbarLocalFile: '本地文件',
+  tipLocalFile: '本地文件浏览器',
+  treeLocalFile: '本地文件',
+
+  toolbarBrowser: '浏览器',
+  tipBrowser: '内置浏览器',
+  treeBrowser: '内置浏览器',
+  browserTitle: '打开网页',
+  browserUrlPrompt: '网址：',
+  browserOpened: ({ url }: { url: string }) => `已打开 ${url}`,
+  browserInvalidUrl: '网址必须以 http:// 或 https:// 开头',
+  browserFailed: ({ err }: { err: string }) => `打开失败: ${err}`,
 
   toolbarAi: 'AI',
   tipAi: 'AI 助手',
@@ -395,6 +408,9 @@ const zh: Dict & typeof staticText = {
   hostKeyHintPath: ({ path }: { path: string }) => `记录文件：${path}`,
   hostKeyHintNoPath: '记录文件：无法定位用户主目录',
   settingsSaved: '设置已保存',
+  settingsTabTerminal: '终端',
+  settingsTabHostKey: '主机密钥',
+  settingsTabLocalTerminal: '本地终端',
 
   // ---------- 关于 ----------
   aboutTitle: '关于 RustTerm',
@@ -427,6 +443,11 @@ const zh: Dict & typeof staticText = {
   xserverArgs: '参数（空格分隔）',
   xserverRemove: '删除',
   xserverSaved: 'X server 配置已保存',
+
+  terminalConfigTitle: '本地终端配置',
+  terminalConfigHint: '点「本地会话」时使用的程序。例如 powershell.exe、pwsh.exe、cmd.exe、wsl.exe。',
+  terminalProgram: '程序路径',
+  terminalArgs: '参数（空格分隔）',
 
   // ---------- 工具 / 视图菜单 ----------
   toolsMenuTitle: '工具',
@@ -755,6 +776,19 @@ const en: Dict & typeof staticText = {
   scanInvalidTarget: 'Bad target format',
   scanInvalidPorts: 'Bad port format',
 
+  toolbarLocalFile: 'Local files',
+  tipLocalFile: 'Local file browser',
+  treeLocalFile: 'Local files',
+
+  toolbarBrowser: 'Browser',
+  tipBrowser: 'Built-in browser',
+  treeBrowser: 'Built-in browser',
+  browserTitle: 'Open page',
+  browserUrlPrompt: 'URL:',
+  browserOpened: ({ url }: { url: string }) => `Opened ${url}`,
+  browserInvalidUrl: 'URL must start with http:// or https://',
+  browserFailed: ({ err }: { err: string }) => `Could not open: ${err}`,
+
   toolbarAi: 'AI',
   tipAi: 'AI assistant',
   aiTitle: 'AI assistant',
@@ -840,6 +874,9 @@ const en: Dict & typeof staticText = {
   hostKeyHintPath: ({ path }: { path: string }) => `Recorded in: ${path}`,
   hostKeyHintNoPath: 'Recorded in: cannot locate the user home directory',
   settingsSaved: 'Settings saved',
+  settingsTabTerminal: 'Terminal',
+  settingsTabHostKey: 'Host key',
+  settingsTabLocalTerminal: 'Local terminal',
 
   // ---------- about ----------
   aboutTitle: 'About RustTerm',
@@ -872,6 +909,11 @@ const en: Dict & typeof staticText = {
   xserverArgs: 'Arguments (space-separated)',
   xserverRemove: 'Remove',
   xserverSaved: 'X server configuration saved',
+
+  terminalConfigTitle: 'Local terminal',
+  terminalConfigHint: 'Program used for local sessions. e.g. powershell.exe, pwsh.exe, cmd.exe, wsl.exe.',
+  terminalProgram: 'Program',
+  terminalArgs: 'Arguments (space-separated)',
 
   // ---------- tools / view menus ----------
   toolsMenuTitle: 'Tools',
