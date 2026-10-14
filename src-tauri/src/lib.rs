@@ -98,7 +98,7 @@ pub struct AppState {
     pub ssh_sessions: Mutex<HashMap<String, ssh::SshHandle>>,
     pub vnc_manager: Arc<vnc::VncSessionManager>,
     pub rdp_sessions: Mutex<HashMap<String, rdp::RdpHandle>>,
-    pub spice_sessions: Mutex<HashMap<String, spice::SpiceHandle>>,
+    pub spice_manager: Arc<spice::SpiceSessionManager>,
     pub cancel_flags: Mutex<HashMap<String, Arc<sftp::TransferCancel>>>,
     pub host_key_policy: Mutex<HostKeyPolicy>,
     pub rdp_pending_certificates: rdp::RdpCertificatePendingMap,
@@ -359,77 +359,82 @@ async fn spice_connect(
     state: tauri::State<'_, AppState>,
     host: String,
     port: u16,
-    password: String,
+    password: Option<String>,
+    frame_channel: Channel<InvokeResponseBody>,
 ) -> Result<String, String> {
-    let id = format!("spice-{}", uuid_like());
-    let handle = spice::connect(app, id.clone(), &host, port, &password)
+    let config = spice::SpiceConnectConfig {
+        session_id: format!("spice-{}", uuid_like()),
+        host,
+        port,
+        password: password.filter(|p| !p.is_empty()),
+        view_only: false,
+        reconnect_enabled: true,
+        reconnect_max_attempts: 5,
+        cursor_enabled: true,
+    };
+    let id = config.session_id.clone();
+    state
+        .spice_manager
+        .create_session(app, config)
         .await
         .map_err(|e| e.to_string())?;
-    state.spice_sessions.lock().unwrap().insert(id.clone(), handle);
+    state
+        .spice_manager
+        .attach_frame_channel(&id, frame_channel)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(id)
 }
 
 #[tauri::command]
-fn spice_send_key(
-    state: tauri::State<AppState>,
+async fn spice_send_input(
+    state: tauri::State<'_, AppState>,
     session_id: String,
-    scancode: u32,
-    down: bool,
+    events: Vec<spice::SpiceInputEvent>,
 ) -> Result<(), String> {
-    let map = state.spice_sessions.lock().unwrap();
-    let handle = map.get(&session_id).ok_or("spice session not found")?;
-    handle.send_key(scancode, down).map_err(|e| e.to_string())
+    state
+        .spice_manager
+        .send_input(&session_id, events)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn spice_send_pointer(
-    state: tauri::State<AppState>,
+async fn spice_attach_frame_channel(
+    state: tauri::State<'_, AppState>,
     session_id: String,
-    x: i32,
-    y: i32,
-    button: Option<u8>,
-    down: Option<bool>,
+    frame_channel: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
-    let map = state.spice_sessions.lock().unwrap();
-    let handle = map.get(&session_id).ok_or("spice session not found")?;
-
-    if let Some(b) = button {
-        // 鼠标按键事件
-        let is_down = down.unwrap_or(false);
-        if is_down {
-            handle.send_mouse_press(b, 0).map_err(|e| e.to_string())?;
-        } else {
-            handle.send_mouse_release(b, 0).map_err(|e| e.to_string())?;
-        }
-    } else {
-        // 鼠标移动：SPICE 需要区分绝对/相对，这里默认用绝对定位
-        // （大多数现代 QEMU 配置有 usb-tablet，走 client 模式）
-        handle
-            .send_mouse_position(x.max(0) as u32, y.max(0) as u32, 0)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    state
+        .spice_manager
+        .attach_frame_channel(&session_id, frame_channel)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn spice_send_motion(
-    state: tauri::State<AppState>,
+async fn spice_detach_frame_channel(
+    state: tauri::State<'_, AppState>,
     session_id: String,
-    dx: i32,
-    dy: i32,
-    buttons: u32,
 ) -> Result<(), String> {
-    let map = state.spice_sessions.lock().unwrap();
-    let handle = map.get(&session_id).ok_or("spice session not found")?;
-    handle.send_mouse_motion(dx, dy, buttons).map_err(|e| e.to_string())
+    state
+        .spice_manager
+        .detach_frame_channel(&session_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn spice_close(state: tauri::State<AppState>, session_id: String) -> Result<(), String> {
-    if let Some(handle) = state.spice_sessions.lock().unwrap().remove(&session_id) {
-        handle.close();
-    }
-    Ok(())
+async fn spice_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state
+        .spice_manager
+        .close(&app, &session_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub struct XServerState(pub StdMutex<Option<xserver::XServer>>);
@@ -1663,7 +1668,7 @@ pub fn run() {
             ssh_sessions: Mutex::new(HashMap::new()),
             vnc_manager: Arc::new(vnc::VncSessionManager::new()),
             rdp_sessions: Mutex::new(HashMap::new()),
-            spice_sessions: Mutex::new(HashMap::new()),
+            spice_manager: Arc::new(spice::SpiceSessionManager::new()),
             cancel_flags: Mutex::new(HashMap::new()),
             host_key_policy: Mutex::new(HostKeyPolicy::default()),
             rdp_pending_certificates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -1685,7 +1690,7 @@ pub fn run() {
             telnet_connect, portscan::port_scan,portscan::cancel_scan,
             vnc_connect, vnc_send_input, vnc_set_clipboard_text,vnc_respond_server_key, vnc_attach_frame_channel, vnc_detach_frame_channel, vnc_close,
             rdp_connect, rdp_send_pointer, rdp_send_key, rdp_send_input_batch,rdp_set_streaming, rdp_attach_frame_channel, rdp_detach_frame_channel,rdp_resize, rdp_respond_certificate, rdp_list_known_hosts, rdp_remove_known_host, rdp_known_hosts_file,rdp_set_clipboard_text,rdp_close,
-            spice_connect, spice_send_key, spice_send_pointer,spice_send_motion, spice_close,
+            spice_connect, spice_send_input, spice_attach_frame_channel, spice_detach_frame_channel, spice_close,
             path_exists, file_version, open_external, exit_app, set_menu_language,
             set_host_key_policy, get_host_key_policy, known_hosts_file, terminal_get_config, terminal_save_config,
             browser_open, browser_set_bounds, browser_set_visible,browser_close, browser_navigate,browser_text_update, browser_read_text,

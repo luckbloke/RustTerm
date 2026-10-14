@@ -47,7 +47,7 @@ tracing = "0.1"
 # 避免 libz-sys 编译 C：把 rust_backend 作为直接依赖
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 
 capsaicin-client = { path = "../vendor/capsaicin/crates/capsaicin-client" }
@@ -71,5 +71,6 @@ codegen-units = 1
 strip = true
 
 [patch.crates-io]
+flate2 = { path = "../vendor/flate2" }
 picky = { path = "../vendor/picky" }
 sspi = { path = "../vendor/sspi" }
