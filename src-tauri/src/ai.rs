@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub struct AiMessage {
     pub role: String,      // "user" | "assistant" | "system"
     pub content: String,
+    /// 附加图片（data URL，「data:image/png;base64,…」）。视觉模型用。
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,6 +88,34 @@ pub async fn chat(config: &AiConfig, history: &[AiMessage]) -> Result<String> {
     }
 }
 
+/// 把 data URL 拆成 (mime, base64 裸数据)。不是 data URL 就按 png 裸 base64 处理。
+fn split_data_url(data: &str) -> (&str, &str) {
+    if let Some(rest) = data.strip_prefix("data:") {
+        if let Some(idx) = rest.find(";base64,") {
+            return (&rest[..idx], &rest[idx + 8..]);
+        }
+    }
+    ("image/png", data)
+}
+
+/// OpenAI 格式：文本 + 图片 → content 数组；没图片就用纯文本。
+fn openai_content(m: &AiMessage) -> serde_json::Value {
+    if m.images.is_empty() {
+        return serde_json::Value::String(m.content.clone());
+    }
+    let mut parts = vec![serde_json::json!({
+        "type": "text",
+        "text": m.content,
+    })];
+    for img in &m.images {
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": img },  // OpenAI 直接接受完整 data URL
+        }));
+    }
+    serde_json::Value::Array(parts)
+}
+
 async fn chat_openai(config: &AiConfig, history: &[AiMessage]) -> Result<String> {
     let client = reqwest::Client::new();
     let mut messages = vec![serde_json::json!({
@@ -94,7 +125,7 @@ async fn chat_openai(config: &AiConfig, history: &[AiMessage]) -> Result<String>
     for m in history {
         messages.push(serde_json::json!({
             "role": m.role,
-            "content": m.content,
+            "content": openai_content(m),
         }));
     }
 
@@ -125,9 +156,25 @@ async fn chat_anthropic(config: &AiConfig, history: &[AiMessage]) -> Result<Stri
     let mut messages = Vec::new();
     for m in history {
         if m.role == "system" { continue; }
+        // Anthropic 格式：{"type":"image","source":{"type":"base64",...}}
+        let mut parts = vec![serde_json::json!({
+            "type": "text",
+            "text": m.content,
+        })];
+        for img in &m.images {
+            let (mime, raw) = split_data_url(img);
+            parts.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": raw,
+                },
+            }));
+        }
         messages.push(serde_json::json!({
             "role": m.role,
-            "content": m.content,
+            "content": parts,
         }));
     }
 
@@ -161,10 +208,16 @@ async fn chat_ollama(config: &AiConfig, history: &[AiMessage]) -> Result<String>
         "content": SYSTEM_PROMPT,
     })];
     for m in history {
-        messages.push(serde_json::json!({
+        let mut msg = serde_json::json!({
             "role": m.role,
             "content": m.content,
-        }));
+        });
+        if !m.images.is_empty() {
+            // Ollama 要求 images 是不带 data URL 前缀的裸 base64
+            let images: Vec<&str> = m.images.iter().map(|i| split_data_url(i).1).collect();
+            msg["images"] = serde_json::json!(images);
+        }
+        messages.push(msg);
     }
 
     let body = serde_json::json!({

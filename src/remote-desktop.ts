@@ -11,6 +11,10 @@ interface RemoteSession {
   height: number;
   /** RDP 用：'fit-window' 或 'native'。其它协议为 undefined。 */
   displayMode?: 'fit-window' | 'native';
+  /** SPICE 用：'client'（绝对定位）或 'server'（相对位移）。 */
+  spiceMouseMode?: 'client' | 'server';
+  /** SPICE 用：多 surface 时当前活跃的 surface id。 */
+  spiceActiveSurfaceId?: number;
 }
 
 const sessions = new Map<string, RemoteSession>();
@@ -22,6 +26,39 @@ const MOUSE_INTERVAL_MS = 16;
 
 /** 每个 RDP 会话的输入事件队列。 */
 const rdpInputQueues = new Map<string, any[]>();
+
+/** 每个 SPICE 会话的输入事件队列。 */
+const spiceInputQueues = new Map<string, any[]>();
+/** 每个 SPICE 会话按下的 scancode 集合，blur 时逐个释放。 */
+const pressedSpiceKeys = new Map<string, Set<number>>();
+
+function ensureSpiceFlush(sessionId: string): void {
+  if (spiceInputQueues.has(sessionId)) return;
+  spiceInputQueues.set(sessionId, []);
+  setInterval(() => {
+    const queue = spiceInputQueues.get(sessionId);
+    if (!queue || queue.length === 0) return;
+    const events = queue.splice(0, queue.length);
+    invoke('spice_send_input', { sessionId, events }).catch((err) => {
+      console.error('[SPICE] input 失败:', err);
+    });
+  }, 16);
+}
+
+function pushSpiceInput(sessionId: string, event: any): void {
+  ensureSpiceFlush(sessionId);
+  const queue = spiceInputQueues.get(sessionId);
+  if (queue) queue.push(event);
+}
+
+function buttonsToMask(buttons: number): number {
+  let m = 0;
+  if (buttons & 1) m |= 1;   // left
+  if (buttons & 2) m |= 4;   // middle
+  if (buttons & 4) m |= 2;   // right
+  return m;
+}
+
 /** 每个 VNC 会话的输入事件队列。 */
 const vncInputQueues = new Map<string, any[]>();
 
@@ -174,7 +211,39 @@ export async function connectRemote(
     frameChannel.onmessage = (raw) => handleBinaryFrame(sessionId, raw);
     displayMode = 'native';
   } else if (type === 'spice') {
-    sessionId = await invoke<string>('spice_connect', { host, port, password });
+    console.log('[SPICE] === SPICE branch entered ===', { host, port });
+    const frameChannel = new Channel<ArrayBuffer>();
+    let realSessionId = '';
+    frameChannel.onmessage = (raw) => {
+      if (!realSessionId) return;
+      handleBinaryFrame(realSessionId, raw);
+    };
+    try {
+      sessionId = await invoke<string>('spice_connect', {
+        host, port,
+        password: password || null,
+        frameChannel,
+      });
+      realSessionId = sessionId;
+      console.log('[SPICE] spice_connect returned:', sessionId);
+    } catch (e) {
+      console.error('[SPICE] spice_connect FAILED:', e);
+      throw e;
+    }
+
+    listen<{ sessionId: string; state: string; message: string | null; errorKind: string | null }>(
+      `spice-state-${sessionId}`,
+      (e) => {
+        console.log('[SPICE] state event:', e.payload);
+        const { state, message } = e.payload;
+        if (state === 'failed') {
+          console.error('[SPICE] 连接失败:', message);
+        } else if (state === 'active') {
+          console.log('[SPICE] 已连接');
+        }
+      },
+    ).then(() => console.log('[SPICE] listen registered for', sessionId))
+     .catch((err) => console.error('[SPICE] listen failed:', err));
   } else {
     const _exhaustive: never = type;
     throw new Error(`未知远程桌面类型: ${_exhaustive}`);
@@ -268,7 +337,10 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     } else if (type === 'spice') {
       const sc = keyToScancode(e);
       if (sc === 0) return;
-      invoke('spice_send_key', { sessionId, scancode: sc, down: true }).catch(() => {});
+      let set = pressedSpiceKeys.get(sessionId);
+      if (!set) { set = new Set(); pressedSpiceKeys.set(sessionId, set); }
+      set.add(sc);
+      pushSpiceInput(sessionId, { type: 'key', scancode: sc, pressed: true });
     }
   });
 
@@ -284,7 +356,8 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     } else if (type === 'spice') {
       const sc = keyToScancode(e);
       if (sc === 0) return;
-      invoke('spice_send_key', { sessionId, scancode: sc, down: false }).catch(() => {});
+      pressedSpiceKeys.get(sessionId)?.delete(sc);
+      pushSpiceInput(sessionId, { type: 'key', scancode: sc, pressed: false });
     }
   });
 
@@ -331,8 +404,8 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
     });
   }, { passive: false });
 
-    // ===== 剪贴板粘贴（Ctrl+V 走这里）=====
-  canvas.addEventListener('paste', async (e) => {
+  // ===== 剪贴板粘贴（Ctrl+V 走这里）=====
+    canvas.addEventListener('paste', async (e) => {
     const text = e.clipboardData?.getData('text');
     if (!text) return;
     if (type === 'rdp') {
@@ -342,14 +415,23 @@ function bindInput(sessionId: string, type: 'vnc' | 'rdp' | 'spice', canvas: HTM
       e.preventDefault();
       await invoke('vnc_set_clipboard_text', { sessionId, text }).catch(() => {});
     }
+    // SPICE：capsaicin 未实现 Agent channel，暂不支持剪贴板
   });
 
   // ===== 失焦时释放所有按键 =====
-  canvas.addEventListener('blur', () => {
+    canvas.addEventListener('blur', () => {
     if (type === 'rdp') {
       pushRdpInput(sessionId, { kind: 'release-all-keys' });
     } else if (type === 'vnc') {
       pushVncInput(sessionId, { type: 'release-all-keys' });
+    } else if (type === 'spice') {
+      const set = pressedSpiceKeys.get(sessionId);
+      if (set) {
+        for (const sc of set) {
+          pushSpiceInput(sessionId, { type: 'key', scancode: sc, pressed: false });
+        }
+        set.clear();
+      }
     }
   });
 }
@@ -394,14 +476,33 @@ function sendPointerSpice(sessionId: string, canvas: HTMLCanvasElement, e: Mouse
   const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
   const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
   const button = e.button === 0 ? 1 : e.button === 2 ? 3 : 2;
-  invoke('spice_send_pointer', { sessionId, x, y, button, down }).catch(() => {});
+  const mask = buttonsToMask(e.buttons);
+  if (down) {
+    pushSpiceInput(sessionId, { type: 'mouse-press', button, buttons: mask });
+  } else {
+    pushSpiceInput(sessionId, { type: 'mouse-release', button, buttons: mask });
+  }
+  // 同时更新位置，避免按压期间指针飘移
+  pushSpiceInput(sessionId, { type: 'pointer-abs', x, y, buttons: mask });
 }
 
 function sendPointerSpiceMove(sessionId: string, canvas: HTMLCanvasElement, e: MouseEvent): void {
-  const rect = canvas.getBoundingClientRect();
-  const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
-  const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
-  invoke('spice_send_pointer', { sessionId, x, y, button: null, down: null }).catch(() => {});
+  const s = sessions.get(sessionId);
+  const mode = s?.spiceMouseMode ?? 'client';
+  const mask = buttonsToMask(e.buttons);
+  if (mode === 'server') {
+    pushSpiceInput(sessionId, {
+      type: 'pointer-rel',
+      dx: e.movementX,
+      dy: e.movementY,
+      buttons: mask,
+    });
+  } else {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
+    const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
+    pushSpiceInput(sessionId, { type: 'pointer-abs', x, y, buttons: mask });
+  }
 }
 
 function keyToScancode(e: KeyboardEvent): number {
@@ -539,38 +640,153 @@ function redrawPointer(s: RemoteSession, state: PointerState): void {
 }
 
 /* ==========================================================================
-   SPICE 帧
+   SPICE 光标（ARGB8888 → CSS cursor data URL）
    ========================================================================== */
 
-function handleSpiceFrame(
-  sessionId: string,
-  width: number,
-  height: number,
-  jpeg: number[],
-): void {
-  const s = sessions.get(sessionId);
-  if (!s) return;
-  if (s.canvas.width !== width || s.canvas.height !== height) {
-    s.canvas.width = width;
-    s.canvas.height = height;
-    s.width = width;
-    s.height = height;
+interface SpiceCursorEvent {
+  sessionId: string;
+  kind: 'set' | 'from-cache' | 'move' | 'hide' | 'invalidate-one' | 'invalidate-all';
+  x: number;
+  y: number;
+  hotX: number;
+  hotY: number;
+  width: number;
+  height: number;
+  pixelsBase64: string | null;
+  unique: number;
+  visible: boolean;
+}
+
+/** 每个 SPICE 会话的光标缓存（支持 from-cache 回放）。 */
+const spiceCursorCache = new Map<string, Map<number, string>>();
+/** 每个 SPICE 会话当前光标状态。 */
+const spiceCursorState = new Map<string, { url: string | null; hotX: number; hotY: number; visible: boolean }>();
+
+function applySpiceCursor(s: RemoteSession, ev: SpiceCursorEvent): void {
+  let state = spiceCursorState.get(s.id);
+  if (!state) {
+    state = { url: null, hotX: 0, hotY: 0, visible: false };
+    spiceCursorState.set(s.id, state);
   }
-  const blob = new Blob([new Uint8Array(jpeg)], { type: 'image/jpeg' });
-  void createImageBitmap(blob).then((bitmap) => {
-    s.ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-  });
+
+  switch (ev.kind) {
+    case 'hide':
+      state.visible = false;
+      s.canvas.style.cursor = 'none';
+      return;
+
+    case 'invalidate-all':
+      spiceCursorCache.get(s.id)?.clear();
+      state.url = null;
+      s.canvas.style.cursor = 'default';
+      return;
+
+    case 'invalidate-one':
+      spiceCursorCache.get(s.id)?.delete(ev.unique);
+      return;
+
+    case 'from-cache': {
+      const cached = spiceCursorCache.get(s.id)?.get(ev.unique);
+      state.visible = ev.visible;
+      if (!cached) {
+        // 缓存里没有（可能已被 invalidate），退回默认光标
+        state.url = null;
+        s.canvas.style.cursor = 'default';
+        return;
+      }
+      state.url = cached;
+      // hotspot 由 set 时缓存，这里简化处理：直接复用
+      s.canvas.style.cursor =
+        `url(${cached}) ${state.hotX} ${state.hotY}, default`;
+      return;
+    }
+
+    case 'move':
+      // SPICE 的光标位置由 guest 绘制，客户端只负责样式；位置不变
+      return;
+
+    case 'set': {
+      state.visible = ev.visible;
+      state.hotX = ev.hotX;
+      state.hotY = ev.hotY;
+      if (!ev.pixelsBase64 || ev.width === 0 || ev.height === 0) {
+        state.url = null;
+        s.canvas.style.cursor = 'default';
+        return;
+      }
+
+      // ARGB8888 → RGBA
+      const bin = atob(ev.pixelsBase64);
+      const argb = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) argb[i] = bin.charCodeAt(i);
+
+      const rgba = new Uint8ClampedArray(argb.length);
+      for (let i = 0; i < argb.length; i += 4) {
+        rgba[i]     = argb[i + 1]; // R
+        rgba[i + 1] = argb[i + 2]; // G
+        rgba[i + 2] = argb[i + 3]; // B
+        rgba[i + 3] = argb[i];     // A
+      }
+
+      const off = document.createElement('canvas');
+      off.width = ev.width;
+      off.height = ev.height;
+      const octx = off.getContext('2d')!;
+      octx.putImageData(new ImageData(rgba, ev.width, ev.height), 0, 0);
+      const url = off.toDataURL('image/png');
+
+      // 缓存起来，供 from-cache 回放
+      let cache = spiceCursorCache.get(s.id);
+      if (!cache) { cache = new Map(); spiceCursorCache.set(s.id, cache); }
+      cache.set(ev.unique, url);
+
+      state.url = url;
+      s.canvas.style.cursor =
+        `url(${url}) ${ev.hotX} ${ev.hotY}, default`;
+      return;
+    }
+  }
 }
 
 export function setupRemoteListeners(): void {
-  listen<{ sessionId: string; width: number; height: number; data: number[] }>(
-    'spice:frame',
+
+  listen<{
+    sessionId: string;
+    kind: 'set' | 'from-cache' | 'move' | 'hide' | 'invalidate-one' | 'invalidate-all';
+    x: number; y: number;
+    hotX: number; hotY: number;
+    width: number; height: number;
+    pixelsBase64: string | null;
+    unique: number;
+    visible: boolean;
+  }>('spice-cursor', (event) => {
+    const s = sessions.get(event.payload.sessionId);
+    if (!s) return;
+    applySpiceCursor(s, event.payload);
+  }).catch(() => {});
+
+  listen<{ sessionId: string; surfaceId: number; primary: boolean; width: number; height: number }>(
+    'spice:active-surface',
     (event) => {
-      const { sessionId, width, height, data } = event.payload;
-      handleSpiceFrame(sessionId, width, height, data);
+      const s = sessions.get(event.payload.sessionId);
+      if (!s) return;
+      s.spiceActiveSurfaceId = event.payload.surfaceId;
+      s.canvas.width = event.payload.width;
+      s.canvas.height = event.payload.height;
+      s.width = event.payload.width;
+      s.height = event.payload.height;
+      s.ctx.fillStyle = '#000';
+      s.ctx.fillRect(0, 0, s.width, s.height);
     },
-  ).catch((e) => console.error('[RD] spice:frame 监听注册失败:', e));
+  ).catch(() => {});
+
+  listen<{ sessionId: string; mode: 'client' | 'server' }>(
+    'spice-mouse-mode',
+    (event) => {
+      const s = sessions.get(event.payload.sessionId);
+      if (s) s.spiceMouseMode = event.payload.mode;
+    },
+  ).catch(() => {});
 
   listen<{ sessionId: string }>('spice:closed', (event) => {
     const s = sessions.get(event.payload.sessionId);
@@ -650,13 +866,20 @@ export async function closeRemote(sessionId: string, type: 'vnc' | 'rdp' | 'spic
   if (type === 'vnc') {
     await invoke('vnc_close', { sessionId }).catch(() => {});
     vncInputQueues.delete(sessionId);
-  } else if (type === 'rdp') try {
-    await invoke('rdp_close', { sessionId });
-  } finally {
-    rdpInputQueues.delete(sessionId);
-    pointerStates.delete(sessionId);
+  } else if (type === 'rdp') {
+    try {
+      await invoke('rdp_close', { sessionId });
+    } finally {
+      rdpInputQueues.delete(sessionId);
+      pointerStates.delete(sessionId);
+    }
+  } else {
+    await invoke('spice_close', { sessionId }).catch(() => {});
+    spiceInputQueues.delete(sessionId);
+    pressedSpiceKeys.delete(sessionId);
+    spiceCursorCache.delete(sessionId);
+    spiceCursorState.delete(sessionId);
   }
-  else await invoke('spice_close', { sessionId }).catch(() => {});
   const s = sessions.get(sessionId);
   if (s) {
     s.canvas.remove();

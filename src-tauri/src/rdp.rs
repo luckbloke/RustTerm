@@ -1,5 +1,6 @@
 //! 纯 Rust 的 RDP 客户端实现，基于 IronRDP。
-
+#![allow(dead_code)]
+#![allow(unused_assignments)]
 use anyhow::Result;
 use base64::Engine as _;
 use image::codecs::jpeg::JpegEncoder;

@@ -52,17 +52,11 @@ pub fn spawn_local(app: AppHandle, id: String, cols: u16, rows: u16) -> Result<P
         rows, cols, pixel_width: 0, pixel_height: 0,
     })?;
 
-    let shell = if cfg!(windows) { "powershell.exe" } else { "/bin/bash" };
-    let mut cmd = CommandBuilder::new(shell);
+    let cfg = crate::terminal_config::load();
+    let mut cmd = CommandBuilder::new(&cfg.program);
     cmd.env("TERM", "xterm-256color");
-
-    if cfg!(windows) {
-        // 必须写成一条完整语句：PowerShell 的续行符是反引号而不是反斜杠，
-        // 用 "\" 续行会被解析成非法字符，每个本地终端启动时都会先报一次错。
-        cmd.args([
-            "-NoLogo", "-NoExit", "-Command",
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; [Console]::InputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8",
-        ]);
+    for arg in &cfg.args {
+        cmd.arg(arg);
     }
 
     let _child = pair.slave.spawn_command(cmd)?;

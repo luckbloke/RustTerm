@@ -1,6 +1,6 @@
 [package]
 name = "rustterm-tauri"
-version = "0.1.3"
+version = "0.1.5"
 edition = "2021"
 
 [lib]
@@ -47,7 +47,7 @@ tracing = "0.1"
 # 避免 libz-sys 编译 C：把 rust_backend 作为直接依赖
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 
 capsaicin-client = { path = "../vendor/capsaicin/crates/capsaicin-client" }
@@ -63,6 +63,8 @@ ironrdp = { path = "../vendor/ironrdp/crates/ironrdp", default-features = false,
 ironrdp = { path = "../vendor/ironrdp/crates/ironrdp", default-features = false, features = [
     "client", "client-clipboard", "cliprdr", "connector", "core", "input", "pdu", "native-tls"
 ] }
+# AI 标签页截屏：GDI 屏幕区域截图
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
 
 [profile.release]
 opt-level = 3

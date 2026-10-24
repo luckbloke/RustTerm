@@ -306,6 +306,19 @@ const zh: Dict & typeof staticText = {
   scanNoResult: '（暂无开放端口）',
   scanInvalidTarget: '目标格式错误',
   scanInvalidPorts: '端口格式错误',
+  
+  toolbarLocalFile: '本地文件',
+  tipLocalFile: '本地文件浏览器',
+  treeLocalFile: '本地文件',
+
+  toolbarBrowser: '浏览器',
+  tipBrowser: '内置浏览器',
+  treeBrowser: '内置浏览器',
+  browserTitle: '打开网页',
+  browserUrlPrompt: '网址：',
+  browserOpened: ({ url }: { url: string }) => `已打开 ${url}`,
+  browserInvalidUrl: '网址必须以 http:// 或 https:// 开头',
+  browserFailed: ({ err }: { err: string }) => `打开失败: ${err}`,
 
   toolbarAi: 'AI',
   tipAi: 'AI 助手',
@@ -313,6 +326,11 @@ const zh: Dict & typeof staticText = {
   aiPlaceholder: '问点什么…（Enter 发送，Shift+Enter 换行）',
   aiSend: '发送',
   aiClear: '清空对话',
+  aiScreenshot: '截屏分析（OCR：当前标签页内容交给 AI 识别）',
+  aiScreenshotTitle: '标签页截图',
+  aiScreenshotPrompt: '我截了一张当前标签页的图（它可能不是 xterm 终端，比如 Jumpserver Luna 网页终端、远程桌面或浏览器画面）。请先识别图中全部文字（OCR），然后分析：这是什么界面、正在发生什么；如遇报错，说明原因并给出下一步的处理命令（```bash 代码块）。',
+  aiScreenshotFailed: ({ err }: { err: string }) => `标签页截屏失败：${err}`,
+  aiScreenshotNoTab: '没有可截屏的标签页',
   aiSettings: 'AI 配置',
   aiConfigTitle: 'AI 配置',
   aiProvider: '提供方',
@@ -395,6 +413,9 @@ const zh: Dict & typeof staticText = {
   hostKeyHintPath: ({ path }: { path: string }) => `记录文件：${path}`,
   hostKeyHintNoPath: '记录文件：无法定位用户主目录',
   settingsSaved: '设置已保存',
+  settingsTabTerminal: '终端',
+  settingsTabHostKey: '主机密钥',
+  settingsTabLocalTerminal: '本地终端',
 
   // ---------- 关于 ----------
   aboutTitle: '关于 RustTerm',
@@ -427,6 +448,11 @@ const zh: Dict & typeof staticText = {
   xserverArgs: '参数（空格分隔）',
   xserverRemove: '删除',
   xserverSaved: 'X server 配置已保存',
+
+  terminalConfigTitle: '本地终端配置',
+  terminalConfigHint: '点「本地会话」时使用的程序。例如 powershell.exe、pwsh.exe、cmd.exe、wsl.exe。',
+  terminalProgram: '程序路径',
+  terminalArgs: '参数（空格分隔）',
 
   // ---------- 工具 / 视图菜单 ----------
   toolsMenuTitle: '工具',
@@ -755,12 +781,30 @@ const en: Dict & typeof staticText = {
   scanInvalidTarget: 'Bad target format',
   scanInvalidPorts: 'Bad port format',
 
+  toolbarLocalFile: 'Local files',
+  tipLocalFile: 'Local file browser',
+  treeLocalFile: 'Local files',
+
+  toolbarBrowser: 'Browser',
+  tipBrowser: 'Built-in browser',
+  treeBrowser: 'Built-in browser',
+  browserTitle: 'Open page',
+  browserUrlPrompt: 'URL:',
+  browserOpened: ({ url }: { url: string }) => `Opened ${url}`,
+  browserInvalidUrl: 'URL must start with http:// or https://',
+  browserFailed: ({ err }: { err: string }) => `Could not open: ${err}`,
+
   toolbarAi: 'AI',
   tipAi: 'AI assistant',
   aiTitle: 'AI assistant',
   aiPlaceholder: 'Ask something… (Enter to send, Shift+Enter for newline)',
   aiSend: 'Send',
   aiClear: 'Clear chat',
+  aiScreenshot: 'Screenshot analysis (OCR: send this tab view to AI)',
+  aiScreenshotTitle: 'Tab screenshot',
+  aiScreenshotPrompt: 'I captured the current tab view (it may not be an xterm terminal — e.g. a Jumpserver Luna web terminal, remote desktop, or a browser page). Please OCR all text in the image, then analyze: what screen is this, what is happening; if there are errors, explain the cause and suggest next-step commands (```bash blocks).',
+  aiScreenshotFailed: ({ err }: { err: string }) => `Failed to capture tab: ${err}`,
+  aiScreenshotNoTab: 'No tab to capture',
   aiSettings: 'AI settings',
   aiConfigTitle: 'AI settings',
   aiProvider: 'Provider',
@@ -840,6 +884,9 @@ const en: Dict & typeof staticText = {
   hostKeyHintPath: ({ path }: { path: string }) => `Recorded in: ${path}`,
   hostKeyHintNoPath: 'Recorded in: cannot locate the user home directory',
   settingsSaved: 'Settings saved',
+  settingsTabTerminal: 'Terminal',
+  settingsTabHostKey: 'Host key',
+  settingsTabLocalTerminal: 'Local terminal',
 
   // ---------- about ----------
   aboutTitle: 'About RustTerm',
@@ -872,6 +919,11 @@ const en: Dict & typeof staticText = {
   xserverArgs: 'Arguments (space-separated)',
   xserverRemove: 'Remove',
   xserverSaved: 'X server configuration saved',
+
+  terminalConfigTitle: 'Local terminal',
+  terminalConfigHint: 'Program used for local sessions. e.g. powershell.exe, pwsh.exe, cmd.exe, wsl.exe.',
+  terminalProgram: 'Program',
+  terminalArgs: 'Arguments (space-separated)',
 
   // ---------- tools / view menus ----------
   toolsMenuTitle: 'Tools',

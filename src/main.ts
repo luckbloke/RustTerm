@@ -148,6 +148,22 @@ interface Tab {
   disconnected: boolean;
   /** 远程桌面会话（VNC/RDP/SPICE）：term 是空壳，内容由 canvas 渲染 */
   remote?: { sessionId: string; type: 'vnc' | 'rdp' | 'spice' } | null;
+  /** 内置浏览器标签：内容由独立的 WebviewWindow 渲染 */
+  browser?: { label: string; url: string } | null;
+  /** 本地文件浏览器：当前目录 */
+  localFile?: {
+    path: string;
+    showHidden: boolean;
+    listEl: HTMLUListElement;
+    statusEl: HTMLElement;
+    pathInput: HTMLInputElement;
+    /** 多选：选中的路径集合 */
+    selected: Set<string>;
+    /** 最后一次点击的路径（Shift 范围选择用） */
+    lastClicked: string | null;
+    /** 剪贴板：待复制的路径列表 */
+    clipboard: string[];
+  } | null;
 }
 
 interface TransferJob {
@@ -186,6 +202,11 @@ interface RemoteEntry {
  * tab.title 只反映 host，port 和 protocol 会丢，保存会话时需要这份记录。
  */
  const remoteTabInfo = new Map<number, { host: string; port: number; protocol: 'vnc' | 'rdp' | 'spice' }>();
+/**
+ * SSH 标签的连接信息。saveCurrentSession 需要从标签反查 host/port/user，
+ * 不能从 tab.title 反解（title 可能是自定义的）。
+ */
+const sshTabInfo = new Map<number, { host: string; port: number; user: string }>();
 
 let tabs: Tab[] = [];
 let activeTab = 0;
@@ -588,6 +609,460 @@ function createRemoteTab(sessionId: string, title: string, type: 'vnc' | 'rdp' |
   return tab;
 }
 
+/**
+ * 创建一个"本地文件浏览器"标签。
+ *
+ * 纯 HTML 渲染，没有原生窗口，没有 PTY，只是一个嵌在 term-pane 里的列表。
+ */
+function createLocalFileTab(startPath: string, title: string): Tab {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'term-pane';
+  wrapper.style.background = 'var(--bg-card)';
+  wrapper.style.display = 'flex';
+  wrapper.style.flexDirection = 'column';
+  wrapper.style.overflow = 'hidden';
+  panesEl.appendChild(wrapper);
+
+  const term = new Terminal({ cursorBlink: false });
+  const fit = new FitAddon();
+
+  const tab: Tab = {
+    id: nextId++, title, sessionId: `local-${nextId}`, isSsh: false,
+    sftpPath: startPath, sftpRequest: 0, syncGroup: 0, color: '',
+    term, fit, wrapper, pane: wrapper, split: null, search: null,
+    disposables: [], closed: false, disconnected: false,
+    remote: null,
+    // UI 元素在 buildLocalFileUI 里回填，先放占位
+    localFile: {
+      path: startPath,
+      showHidden: false,
+      listEl: null as unknown as HTMLUListElement,
+      statusEl: null as unknown as HTMLElement,
+      pathInput: null as unknown as HTMLInputElement,
+      selected: new Set<string>(),
+      lastClicked: null,
+      clipboard: [],
+    },
+  };
+
+  tabs.push(tab);
+  activeTab = tabs.length - 1;
+  renderTabs();
+  hideWelcome();
+  setActivePanes();
+  saveOpenTabs();
+
+  buildLocalFileUI(tab);
+  void refreshLocalFiles(tab);
+
+  return tab;
+}
+
+/**
+ * 构建本地文件浏览器的 UI 骨架（工具栏 + 列表容器）。
+ * 只建一次，后续刷新只更新列表内容。
+ */
+function buildLocalFileUI(tab: Tab): void {
+  const w = tab.wrapper;
+
+  // 工具栏
+  const toolbar = document.createElement('div');
+  toolbar.className = 'local-file-toolbar';
+
+  const upBtn = document.createElement('button');
+  upBtn.className = 'icon-btn';
+  upBtn.title = '上级目录';
+  upBtn.textContent = '↑';
+  upBtn.onclick = () => {
+    const p = tab.localFile?.path;
+    if (!p) return;
+    const parent = p.replace(/[\\/][^\\/]+$/, '');
+    if (parent && parent !== p) {
+      tab.localFile!.path = parent;
+      void refreshLocalFiles(tab);
+    }
+  };
+
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'icon-btn';
+  refreshBtn.title = '刷新';
+  refreshBtn.textContent = '⟳';
+  refreshBtn.onclick = () => void refreshLocalFiles(tab);
+
+  const homeBtn = document.createElement('button');
+  homeBtn.className = 'icon-btn';
+  homeBtn.title = '主目录';
+  homeBtn.textContent = '⌂';
+  homeBtn.onclick = async () => {
+    try {
+      const home = await invoke<string>('local_home_dir');
+      tab.localFile!.path = home;
+      void refreshLocalFiles(tab);
+    } catch { /* 忽略 */ }
+  };
+
+  const pathInput = document.createElement('input');
+  pathInput.type = 'text';
+  pathInput.className = 'local-file-path';
+  pathInput.spellcheck = false;
+  pathInput.autocomplete = 'off';
+  pathInput.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      tab.localFile!.path = pathInput.value.trim();
+      void refreshLocalFiles(tab);
+    }
+  };
+
+  const mkdirBtn = document.createElement('button');
+  mkdirBtn.className = 'icon-btn';
+  mkdirBtn.title = '新建文件夹';
+  mkdirBtn.textContent = '＋';
+  mkdirBtn.onclick = async () => {
+    const name = await showPrompt('新建文件夹', '文件夹名称：');
+    if (!name) return;
+    try {
+      await invoke('local_mkdir', { parent: tab.localFile!.path, name });
+      void refreshLocalFiles(tab);
+    } catch (e) {
+      setStatus(`创建失败: ${errText(e)}`);
+    }
+  };
+  
+  const hiddenLabel = document.createElement('label');
+  hiddenLabel.className = 'inline-check';
+  const hiddenBox = document.createElement('input');
+  hiddenBox.type = 'checkbox';
+  hiddenBox.checked = tab.localFile?.showHidden ?? false;
+  hiddenBox.onchange = () => {
+    if (tab.localFile) {
+      tab.localFile.showHidden = hiddenBox.checked;
+      void refreshLocalFiles(tab);
+    }
+  };
+  const hiddenText = document.createElement('span');
+  hiddenText.textContent = '显示隐藏文件';
+  hiddenLabel.append(hiddenBox, hiddenText);
+
+  toolbar.append(upBtn, refreshBtn, homeBtn, mkdirBtn, pathInput, hiddenLabel);
+  w.appendChild(toolbar);
+
+  // 列表容器
+  const list = document.createElement('ul');
+  list.className = 'local-file-list';
+  w.appendChild(list);
+
+  // 状态栏
+  const status = document.createElement('div');
+  status.className = 'local-file-status';
+  w.appendChild(status);
+
+  // 回填 UI 元素引用到 tab.localFile（path / showHidden 保留 createLocalFileTab 设的初值）
+  if (tab.localFile) {
+    tab.localFile.listEl = list;
+    tab.localFile.statusEl = status;
+    tab.localFile.pathInput = pathInput;
+  }
+}
+
+interface LocalEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: number | null;
+  hidden: boolean;
+}
+
+async function refreshLocalFiles(tab: Tab): Promise<void> {
+  if (!tab.localFile) return;
+  const list = tab.localFile.listEl;
+  const status = tab.localFile.statusEl;
+  const pathInput = tab.localFile.pathInput;
+  if (!list) return;
+
+  const path = tab.localFile.path;
+  if (pathInput) pathInput.value = path;
+
+  list.textContent = '';
+  const pending = document.createElement('li');
+  pending.className = 'empty';
+  pending.textContent = '…';
+  list.appendChild(pending);
+
+  try {
+    const all = await invoke<LocalEntry[]>('local_list_dir', { path });
+    if (tab.closed) return;
+
+    const entries = tab.localFile.showHidden ? all : all.filter((e) => !e.hidden);
+
+    list.textContent = '';
+    if (entries.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = all.length === 0 ? '（空目录）' : '（全部被隐藏）';
+      list.appendChild(li);
+    }
+
+    for (const entry of entries) {
+      const li = document.createElement('li');
+      if (entry.is_dir) li.classList.add('dir');
+      if (entry.hidden) li.classList.add('hidden-file');
+
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = `${entry.is_dir ? '[D]' : '[F]'} ${entry.name}`;
+      li.appendChild(name);
+
+      if (!entry.is_dir) {
+        const size = document.createElement('span');
+        size.className = 'size';
+        size.textContent = humanSize(entry.size);
+        li.appendChild(size);
+      }
+
+      li.ondblclick = () => {
+        if (entry.is_dir) {
+          tab.localFile!.path = entry.path;
+          void refreshLocalFiles(tab);
+        } else {
+          void invoke('local_open', { path: entry.path }).catch((e) => {
+            setStatus(`打开失败: ${errText(e)}`);
+          });
+        }
+      };
+      
+            // ===== 拖拽源 =====
+      li.draggable = true;
+      li.dataset.path = entry.path;
+      li.ondragstart = (ev) => {
+        ev.dataTransfer?.setData('text/plain', entry.path);
+        // 如果拖的是已选中的项，把整个选中集合带上
+        if (tab.localFile?.selected.has(entry.path)) {
+          ev.dataTransfer?.setData(
+            'application/x-rustterm-multi',
+            JSON.stringify([...tab.localFile.selected]),
+          );
+        }
+      };
+
+      // ===== 多选 =====
+      li.onclick = (ev) => {
+        if (!tab.localFile) return;
+        const sel = tab.localFile.selected;
+        if (ev.ctrlKey || ev.metaKey) {
+          // Ctrl+点击：切换选中
+          if (sel.has(entry.path)) sel.delete(entry.path);
+          else sel.add(entry.path);
+          tab.localFile.lastClicked = entry.path;
+        } else if (ev.shiftKey && tab.localFile.lastClicked) {
+          // Shift+点击：范围选中
+          const all = entries.map((e) => e.path);
+          const from = all.indexOf(tab.localFile.lastClicked);
+          const to = all.indexOf(entry.path);
+          if (from >= 0 && to >= 0) {
+            const [a, b] = from < to ? [from, to] : [to, from];
+            for (let i = a; i <= b; i++) sel.add(all[i]);
+          }
+        } else {
+          // 普通点击：单选
+          sel.clear();
+          sel.add(entry.path);
+          tab.localFile.lastClicked = entry.path;
+        }
+        // 刷新选中样式
+        list.querySelectorAll<HTMLLIElement>('li').forEach((el) => {
+          el.classList.toggle('selected', sel.has(el.dataset.path || ''));
+        });
+      };
+
+      // ===== 拖拽目标（仅目录）=====
+      if (entry.is_dir) {
+        li.ondragover = (ev) => {
+          ev.preventDefault();
+          li.classList.add('drop-target');
+        };
+        li.ondragleave = () => li.classList.remove('drop-target');
+        li.ondrop = async (ev) => {
+          ev.preventDefault();
+          li.classList.remove('drop-target');
+          const multi = ev.dataTransfer?.getData('application/x-rustterm-multi');
+          const paths: string[] = multi
+            ? JSON.parse(multi)
+            : [ev.dataTransfer?.getData('text/plain') || ''];
+          for (const p of paths) {
+            if (!p || p === entry.path) continue;
+            try {
+              await invoke('local_move', { from: p, toDir: entry.path });
+            } catch (e) {
+              setStatus(`移动失败: ${errText(e)}`);
+            }
+          }
+          void refreshLocalFiles(tab);
+        };
+      }
+
+      li.oncontextmenu = (ev) => {
+        ev.preventDefault();
+        void showLocalFileMenu(tab, entry);
+      };
+
+      list.appendChild(li);
+    }
+
+    if (status) status.textContent = `共 ${entries.length} 项`;
+  } catch (e) {
+    if (tab.closed) return;
+    list.textContent = '';
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = `读取失败: ${errText(e)}`;
+    list.appendChild(li);
+  }
+}
+
+async function showLocalFileMenu(tab: Tab, entry: LocalEntry): Promise<void> {
+  const action = await showPrompt(
+    '本地文件',
+    '操作：\n1. 打开\n2. 在资源管理器中显示\n3. 重命名\n4. 删除\n\n输入编号：',
+    '1',
+  );
+  if (!action || tab.closed) return;
+
+  if (action === '1') {
+    void invoke('local_open', { path: entry.path }).catch((e) => {
+      setStatus(`打开失败: ${errText(e)}`);
+    });
+  } else if (action === '2') {
+    void invoke('local_reveal', { path: entry.path }).catch(() => {});
+  } else if (action === '3') {
+    const newName = await showPrompt('重命名', '新名称：', entry.name);
+    if (!newName || newName === entry.name) return;
+    try {
+      await invoke('local_rename', { oldPath: entry.path, newName });
+      void refreshLocalFiles(tab);
+    } catch (e) {
+      setStatus(`重命名失败: ${errText(e)}`);
+    }
+  } else if (action === '4') {
+    const ok = await showConfirm(
+      '删除',
+      `确定删除「${entry.name}」？${entry.is_dir ? '\n（目录会被递归删除）' : ''}`,
+    );
+    if (!ok) return;
+    try {
+      await invoke('local_delete', { path: entry.path, isDir: entry.is_dir });
+      void refreshLocalFiles(tab);
+    } catch (e) {
+      setStatus(`删除失败: ${errText(e)}`);
+    }
+  }
+}
+
+async function openLocalFileDialog(): Promise<void> {
+  let start = '';
+  try {
+    start = await invoke<string>('local_home_dir');
+  } catch { /* 忽略 */ }
+  // 也可以弹出目录选择对话框让用户选起始目录
+  const title = start.split(/[\\/]/).pop() || '本地文件';
+  createLocalFileTab(start, `📁 ${title}`);
+}
+
+/**
+ * 创建一个"内置浏览器"标签。
+ *
+ * 渲染由独立的 WebviewWindow 负责，wrapper 只是个占位容器，
+ * 位置和尺寸通过 browser_set_bounds 同步给 Webview。
+ */
+async function createBrowserTab(url: string, title: string): Promise<Tab> {
+  const label = `browser-${nextId}`;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'term-pane';
+  wrapper.style.background = '#fff';
+  panesEl.appendChild(wrapper);
+
+  // 空壳终端：不 open、不 loadAddon。仅用于类型占位。
+  const term = new Terminal({ cursorBlink: false });
+  const fit = new FitAddon();
+
+  const tab: Tab = {
+    id: nextId++, title, sessionId: label, isSsh: false,
+    sftpPath: '.', sftpRequest: 0, syncGroup: 0, color: '',
+    term, fit, wrapper, pane: wrapper, split: null, search: null,
+    disposables: [], closed: false, disconnected: false,
+    remote: null,
+    browser: { label, url },
+  };
+
+  tabs.push(tab);
+  activeTab = tabs.length - 1;
+  renderTabs();
+  hideWelcome();
+  setActivePanes();
+  saveOpenTabs();
+
+  // 创建 Webview（后端会把它设为不可见）
+  await invoke('browser_open', { label, url });
+
+  // 等一帧，让 wrapper 完成布局，再同步位置
+  await new Promise<void>((resolve) => requestAnimationFrame(() => {
+    requestAnimationFrame(() => resolve());
+  }));
+  await positionBrowser(tab);
+
+  return tab;
+}
+
+/**
+ * 把浏览器 Webview 定位到对应 wrapper 的位置。
+ *
+ * getBoundingClientRect() 给的是视口内坐标，而 Tauri 的 set_position
+ * 期望的是屏幕绝对坐标。所以要把视口坐标加上主窗口在屏幕上的位置。
+ */
+const BROWSER_OFFSET_LEFT = 7;
+const BROWSER_OFFSET_WIDTH = 4;
+
+async function positionBrowser(tab: Tab): Promise<void> {
+  if (!tab.browser) return;
+
+  if (tab.wrapper.style.display === 'none') {
+    void invoke('browser_set_visible', {
+      label: tab.browser.label,
+      visible: false,
+    }).catch(() => {});
+    return;
+  }
+
+  const rect = tab.wrapper.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return;
+
+  let offsetX = 0;
+  let offsetY = 0;
+  try {
+    const win = getCurrentWindow();
+    const scale = await win.scaleFactor();
+    const inner = await win.innerPosition();
+    offsetX = inner.x / scale;
+    offsetY = inner.y / scale;
+  } catch { /* 拿不到就用 0 */ }
+
+  const statusHeight = document.getElementById('statusbar')?.offsetHeight ?? 22;
+
+  void invoke('browser_set_bounds', {
+    label: tab.browser.label,
+    x: offsetX + rect.left - BROWSER_OFFSET_LEFT,
+    y: offsetY + rect.top,
+    width: rect.width - BROWSER_OFFSET_WIDTH,
+    height: rect.height - statusHeight,
+  }).catch(() => {});
+
+  void invoke('browser_set_visible', {
+    label: tab.browser.label,
+    visible: true,
+  }).catch(() => {});
+}
+
 function createTab(sessionId: string, title: string, isSsh: boolean): Tab {
   // wrapper 负责在 #terminal-panes 中定位；pane 才是终端实际打开的元素。
   // 分成两层是为了分屏：若终端直接开在 wrapper 上，第二窗格的包含块
@@ -682,6 +1157,10 @@ function activateTab(index: number): void {
   tab.term.focus();
   refreshSftpVisibility();
   if (tab.isSsh) void refreshSftp();
+    // 同步所有浏览器标签的 Webview 可见性
+  for (const t of tabs) {
+    if (t.browser) void positionBrowser(t);
+  }
   saveOpenTabs();
 }
 
@@ -725,6 +1204,12 @@ function closeTab(tab: Tab, keepPane = false): void {
 
   // 清理远程桌面标签的元数据
   remoteTabInfo.delete(tab.id);
+  sshTabInfo.delete(tab.id);
+
+  // 浏览器标签：关闭 Webview
+  if (tab.browser) {
+    void invoke('browser_close', { label: tab.browser.label }).catch(() => {});
+  }
 
   tab.term.dispose();
   tab.wrapper.remove();
@@ -1406,8 +1891,9 @@ async function showSessionManager(): Promise<void> {
           ev.preventDefault();
           if (!await showConfirm('sessDeleteTitle', 'sessDeleteConfirm', { name: session.name })) return;
           // delete_session 会一并清除凭据库里的密码
-          await invoke('delete_session', {
+            await invoke('delete_session', {
             host: session.host, port: session.port, user: session.user,
+            protocol: session.protocol ?? 'ssh',
           }).catch(() => {});
           await showSessionManager();
         };
@@ -1530,7 +2016,10 @@ async function connectSaved(session: SavedSession): Promise<void> {
       host: session.host, port: session.port, user: session.user, password,
       cols: dims.cols, rows: dims.rows,
     });
-    createTab(sessionId, t('sshTabTitle', { user: session.user, host: session.host }), true);
+    const newTab = createTab(sessionId, t('sshTabTitle', { user: session.user, host: session.host }), true);
+    sshTabInfo.set(newTab.id, {
+      host: session.host, port: session.port, user: session.user,
+    });
     setStatus(t('sshConnected', { user: session.user, host: session.host }));
   } catch (e) {
     setStatus(t('sshFailed', { err: errText(e) }));
@@ -1743,8 +2232,24 @@ async function connectFromForm(opts: {
         });
       }
     }
-    createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    const newTab = createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    sshTabInfo.set(newTab.id, { host, port, user });
     setStatus(t('sshConnected', { user, host }));
+
+    // 自动保存会话到 sessions.json。
+    // 用户从"新建 SSH 会话"表单连上后，不需要再手动保存一次。
+    // 不存密码（密码保存需要凭据库交互，走手动路径）。
+    try {
+      await invoke('save_session_full', {
+        host, port, user,
+        group: '', color: '',
+        savePassword: false, password: null,
+        protocol: 'ssh',
+      });
+      void showSessionManager();
+    } catch (e) {
+      console.warn('[ssh] 自动保存会话失败:', e);
+    }
   } catch (e) {
     setStatus(t('sshFailed', { err: errText(e) }));
     if (await showConfirm('sshRetryTitle', 'sshRetryBody')) {
@@ -1823,7 +2328,8 @@ async function quickConnect(): Promise<void> {
         }
       }
     }
-    createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    const newTab = createTab(sessionId, t('sshTabTitle', { user, host }), true);
+    sshTabInfo.set(newTab.id, { host, port, user });
     setStatus(t('sshConnected', { user, host }));
   } catch (e) {
     setStatus(t('sshFailed', { err: errText(e) }));
@@ -1981,16 +2487,46 @@ async function showPackages(): Promise<void> {
 /* ==========================================================================
    17. 设置
    ========================================================================== */
+/** 切换设置面板内部的 tab。 */
+function switchSettingsTab(name: string): void {
+  document.querySelectorAll<HTMLButtonElement>('.settings-nav-item').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.settingsTab === name);
+  });
+  document.querySelectorAll<HTMLElement>('.settings-panel').forEach((panel) => {
+    panel.classList.toggle('active', panel.dataset.settingsPanel === name);
+  });
+  if (name === 'hostkey') void renderHostKeyHint();
+}
 
 function openSettings(): void {
+  // 终端 tab
   $<HTMLInputElement>('set-fontsize').value = String(fontSize);
   const tab = currentTab();
   $<HTMLInputElement>('set-scrollback').value = String(tab?.term.options.scrollback ?? 5000);
   $<HTMLInputElement>('set-cursor').checked = tab?.term.options.cursorBlink ?? true;
   $<HTMLInputElement>('set-multiexec').checked = currentSyncGroup() > 0;
+
+  // 主机密钥 tab
   $<HTMLSelectElement>('set-hostkey').value = hostKeyPolicy;
-  void renderHostKeyHint();
+
+  // 本地终端 tab
+  void loadTerminalConfigIntoPanel();
+
+  // 默认显示「终端」tab
+  switchSettingsTab('terminal');
   $('settings-modal').classList.remove('hidden');
+}
+
+/** 从后端读终端配置，填进「本地终端」tab。 */
+async function loadTerminalConfigIntoPanel(): Promise<void> {
+  try {
+    const cfg = await invoke<{ program: string; args: string[] }>('terminal_get_config');
+    $<HTMLInputElement>('terminal-program').value = cfg.program;
+    $<HTMLInputElement>('terminal-args').value = cfg.args.join(' ');
+  } catch {
+    $<HTMLInputElement>('terminal-program').value = '';
+    $<HTMLInputElement>('terminal-args').value = '';
+  }
 }
 
 interface XServerConfigEntry {
@@ -2088,12 +2624,13 @@ async function renderHostKeyHint(): Promise<void> {
     : `${text}\n${hostKeyPolicy === 'insecure' ? '' : t('hostKeyHintNoPath')}`.trim();
 }
 
-function saveSettings(): void {
+async function saveSettings(): Promise<void> {
+  // 终端 tab
   fontSize = parseInt($<HTMLInputElement>('set-fontsize').value, 10) || 14;
   const scrollback = parseInt($<HTMLInputElement>('set-scrollback').value, 10) || 5000;
   const cursorBlink = $<HTMLInputElement>('set-cursor').checked;
   const multiExec = $<HTMLInputElement>('set-multiexec').checked;
-  const policy = $<HTMLSelectElement>('set-hostkey').value as HostKeyPolicy;
+
   for (const tab of tabs) {
     tab.term.options.fontSize = fontSize;
     tab.term.options.scrollback = scrollback;
@@ -2104,13 +2641,23 @@ function saveSettings(): void {
       tab.split.term.options.cursorBlink = cursorBlink;
     }
   }
-  // 同步开关是全局的（所有标签），与工具栏按钮共用同一状态。
   if (currentSyncGroup() > 0 !== multiExec) toggleMultiExec();
 
+  // 主机密钥 tab
+  const policy = $<HTMLSelectElement>('set-hostkey').value as HostKeyPolicy;
   if (policy !== hostKeyPolicy) {
     hostKeyPolicy = policy;
     localStorage.setItem(HOSTKEY_KEY, hostKeyPolicy);
     void invoke('set_host_key_policy', { policy: hostKeyPolicy }).catch(() => {});
+  }
+
+  // 本地终端 tab
+  const program = $<HTMLInputElement>('terminal-program').value.trim();
+  if (program) {
+    const argsStr = $<HTMLInputElement>('terminal-args').value.trim();
+    const args = argsStr ? argsStr.split(/\s+/).filter(Boolean) : [];
+    await invoke('terminal_save_config', { cfg: { program, args } })
+      .catch((e) => setStatus(t('errUnknown', { err: errText(e) })));
   }
 
   localStorage.setItem(FONT_KEY, String(fontSize));
@@ -2359,9 +2906,23 @@ $('batch-run').onclick = async () => {
 };
 $('batch-cancel').onclick = () => $('batch-modal').classList.add('hidden');
 
-/* --- 弹窗按钮 --- */
 $('set-cancel').onclick = () => $('settings-modal').classList.add('hidden');
-$('set-ok').onclick = saveSettings;
+$('set-ok').onclick = () => void saveSettings();
+
+// 设置面板 tab 切换
+document.querySelectorAll<HTMLButtonElement>('.settings-nav-item').forEach((btn) => {
+  btn.onclick = () => switchSettingsTab(btn.dataset.settingsTab || '');
+});
+
+// 终端配置预设按钮
+document.querySelectorAll<HTMLButtonElement>('.terminal-presets button').forEach((btn) => {
+  btn.onclick = () => {
+    const [prog, args] = (btn.dataset.preset || '').split('|');
+    $<HTMLInputElement>('terminal-program').value = prog;
+    $<HTMLInputElement>('terminal-args').value = args;
+  };
+});
+
 $('about-ok').onclick = () => $('about-modal').classList.add('hidden');
 $('macro-cancel').onclick = () => $('macro-modal').classList.add('hidden');
 $('tunnel-close').onclick = () => $('tunnel-modal').classList.add('hidden');
@@ -2421,6 +2982,8 @@ async function runTool(tool: string): Promise<void> {
     case 'rdp': await openRdpDialog(); break;
     case 'vnc': await openVncDialog(); break;
     case 'spice': await openSpiceDialog(); break;
+    case 'browser': await openBrowserDialog(); break;
+    case 'local-file': await openLocalFileDialog(); break;
     default: break;
   }
 }
@@ -2544,6 +3107,23 @@ async function openSpiceDialog(): Promise<void> {
   }
 }
 
+/** 打开内置浏览器对话框。 */
+async function openBrowserDialog(): Promise<void> {
+  const url = await showPrompt('browserTitle', 'browserUrlPrompt', 'https://');
+  if (!url) return;
+  // 简单校验：必须有协议头
+  if (!/^https?:\/\//i.test(url)) {
+    setStatus(t('browserInvalidUrl'));
+    return;
+  }
+  try {
+    await createBrowserTab(url, url);
+    setStatus(t('browserOpened', { url }));
+  } catch (e) {
+    setStatus(t('browserFailed', { err: errText(e) }));
+  }
+}
+
 /* --- 快速连接 / 欢迎页 --- */
 $('btn-connect').onclick = () => void quickConnect();
 $<HTMLInputElement>('quick-input').addEventListener('keydown', (e) => {
@@ -2636,6 +3216,8 @@ document.querySelectorAll<HTMLButtonElement>('.tool-btn').forEach((btn) => {
       case 'multiexec': toggleMultiExec(); break;
       case 'batch': await openBatchCommand(); break;
       case 'tunneling': await openTunnelManager(); break;
+      case 'browser': await openBrowserDialog(); break;
+      case 'local-file': await openLocalFileDialog(); break;
       case 'telnet': await openTelnet(); break;
       case 'ping': await pingHost(); break;
       case 'split': await doSplit(); break;
@@ -2679,6 +3261,39 @@ document.addEventListener('keydown', (e) => {
     activateTab((activeTab + 1) % tabs.length);
     return;
   }
+  // 本地文件标签：Ctrl+C / Ctrl+V
+  const activeEl = document.activeElement as HTMLElement | null;
+  const inLocalFile = activeEl?.closest('.term-pane')?.querySelector('.local-file-list');
+  if (inLocalFile && e.ctrlKey) {
+    const tab = currentTab();
+    if (tab?.localFile) {
+      const k = e.key.toLowerCase();
+      if (k === 'c') {
+        e.preventDefault();
+        tab.localFile.clipboard = [...tab.localFile.selected];
+        setStatus(`已复制 ${tab.localFile.clipboard.length} 项`);
+        return;
+      }
+      if (k === 'v') {
+        e.preventDefault();
+        if (tab.localFile.clipboard.length === 0) return;
+        void (async () => {
+          const items = [...tab.localFile!.clipboard];
+          for (const p of items) {
+            try {
+              await invoke('local_copy', { from: p, toDir: tab.localFile!.path });
+            } catch (err) {
+              setStatus(`复制失败: ${errText(err)}`);
+            }
+          }
+          tab.localFile!.clipboard = [];
+          void refreshLocalFiles(tab);
+        })();
+        return;
+      }
+    }
+  }
+  
   if (!e.ctrlKey) return;
   const key = e.key.toLowerCase();
   if (key === 't') { e.preventDefault(); void startLocalTerminal(); }
@@ -2798,14 +3413,25 @@ async function saveRemoteSession(tab: Tab): Promise<void> {
 }
 
 async function saveCurrentSession(): Promise<void> {
-  // 先看当前标签是不是远程桌面
+  // 远程桌面标签走独立路径
   const tab = currentTab();
   if (tab?.remote) {
     await saveRemoteSession(tab);
     return;
   }
-  const parsed = parseTarget($<HTMLInputElement>('quick-input').value);
-  if (!parsed.user) { setStatus(t('sessNeedQuickInput')); return; }
+
+  // 普通终端标签：从标签本身拿连接信息
+  // 本地终端（isSsh=false）没有远端会话，不能保存
+  if (!tab || !tab.isSsh) {
+    setStatus(t('sessNeedQuickInput'));
+    return;
+  }
+  const info = sshTabInfo.get(tab.id);
+  if (!info) {
+    setStatus(t('sessNeedQuickInput'));
+    return;
+  }
+
   const group = (await showPrompt('sessSaveTitle', 'sessGroupPrompt')) || '';
 
   // 记住密码是可选项：凭据库不可用时直接跳过，不打扰用户
@@ -2815,7 +3441,7 @@ async function saveCurrentSession(): Promise<void> {
   if (store.available) {
     savePassword = await showConfirm('sessSaveTitle', 'sessRememberPasswordAsk');
     if (savePassword) {
-      password = await askPassword(parsed.user, parsed.host, parsed.port);
+      password = await askPassword(info.user, info.host, info.port);
       if (password === null) return;
     }
   } else {
@@ -2825,8 +3451,9 @@ async function saveCurrentSession(): Promise<void> {
   const color = (await showPrompt('sessSaveTitle', 'sessColorPrompt')) || '';
   try {
     await invoke('save_session_full', {
-      host: parsed.host, port: parsed.port, user: parsed.user,
+      host: info.host, port: info.port, user: info.user,
       group, color, savePassword, password,
+      protocol: 'ssh',
     });
     await showSessionManager();
     setStatus(savePassword ? t('sessPasswordSaved') : t('sessSaved'));
@@ -2856,6 +3483,8 @@ async function secretStoreStatus(): Promise<SecretStoreStatus> {
 interface AiMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** 附加图片（data URL）。截屏分析时携带，交给视觉模型 OCR。 */
+  images?: string[];
 }
 
 interface AiConfig {
@@ -2884,11 +3513,94 @@ let agentState: AgentState | null = null;
 
 function openAiPanel(): void {
   $('ai-panel').classList.remove('hidden');
+  document.body.classList.add('ai-panel-open');
   $<HTMLTextAreaElement>('ai-input').focus();
+
+  // 等 CSS 过渡（150ms）结束再重新布局
+  setTimeout(() => {
+    const tab = currentTab();
+    if (!tab) return;
+    if (tab.browser) void positionBrowser(tab);
+    if (!tab.remote) fitTab(tab);
+  }, 200);
 }
 
 function closeAiPanel(): void {
   $('ai-panel').classList.add('hidden');
+  document.body.classList.remove('ai-panel-open');
+
+  setTimeout(() => {
+    const tab = currentTab();
+    if (!tab) return;
+    if (tab.browser) void positionBrowser(tab);
+    if (!tab.remote) fitTab(tab);
+  }, 200);
+}
+
+/**
+ * AI 面板宽度拖拽。
+ *
+ * 鼠标按下左侧手柄 → 记录起始位置和起始宽度；
+ * 鼠标移动 → 更新 --ai-panel-width，Webview 跟随；
+ * 鼠标松开 → 结束拖拽，重新 fit 终端。
+ */
+function setupAiPanelResize(): void {
+  const handle = $('ai-resize-handle');
+  const panel = $('ai-panel');
+
+  const MIN_WIDTH = 240;
+  const MAX_WIDTH = 800;
+
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 0;
+  let resizeRaf = 0;
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (!dragging) return;
+    const delta = startX - e.clientX;
+    let next = startWidth + delta;
+    next = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, next));
+    document.documentElement.style.setProperty('--ai-panel-width', `${next}px`);
+
+    // Webview 跟随（每帧最多一次）
+    if (resizeRaf) return;
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = 0;
+      const tab = currentTab();
+      if (tab?.browser) void positionBrowser(tab);
+    });
+  };
+
+  const onMouseUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
+
+    const tab = currentTab();
+    if (tab) {
+      if (tab.browser) void positionBrowser(tab);
+      if (!tab.remote) fitTab(tab);
+    }
+
+    try {
+      const w = getComputedStyle(document.documentElement)
+        .getPropertyValue('--ai-panel-width').trim();
+      localStorage.setItem('rustterm.aiPanelWidth', w);
+    } catch { /* 忽略 */ }
+  };
+
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startWidth = panel.offsetWidth;
+    handle.classList.add('dragging');
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
 }
 
 function loadAiConfig(): AiConfig {
@@ -2959,6 +3671,70 @@ function readTerminalContext(tab: Tab, lines = 50, maxLineLen = 200): string {
   return out.join('\n');
 }
 
+/**
+ * 截取当前标签页内容，返回 PNG data URL。
+ *
+ * 用后端 GDI 按屏幕物理坐标截取，不依赖 xterm：
+ * Jumpserver Luna 这类自绘网页终端、VNC/RDP 画布、内置浏览器都能截到。
+ */
+async function captureTabImage(): Promise<string | null> {
+  const tab = currentTab();
+  if (!tab) {
+    setStatus(t('aiScreenshotNoTab'));
+    return null;
+  }
+
+  const rect = tab.wrapper.getBoundingClientRect();
+  if (rect.width < 8 || rect.height < 8) {
+    setStatus(t('aiScreenshotFailed', { err: 'tab region too small' }));
+    return null;
+  }
+
+  // 视口逻辑坐标 → 屏幕物理坐标（同 positionBrowser 的换算方式）
+  const win = getCurrentWindow();
+  let scale = 1;
+  let innerX = 0;
+  let innerY = 0;
+  try {
+    scale = await win.scaleFactor();
+    const inner = await win.innerPosition();
+    innerX = inner.x;
+    innerY = inner.y;
+  } catch { /* 拿不到就按 0 */ }
+
+  const x = Math.round(innerX + rect.left * scale);
+  const y = Math.round(innerY + rect.top * scale);
+  const width = Math.round(rect.width * scale);
+  const height = Math.round(rect.height * scale);
+
+  return await invoke<string>('ai_capture_tab_region', { x, y, width, height });
+}
+
+/** 交互函数：截屏后立刻让 AI 识别分析。 */
+async function aiScreenshotAnalyze(): Promise<void> {
+  try {
+    const dataUrl = await captureTabImage();
+    if (!dataUrl) return;
+    // 输入框里有字就当补充问题，没有就用默认的“识别并分析”
+    const input = $<HTMLTextAreaElement>('ai-input');
+    const extra = input.value.trim();
+    input.value = '';
+    const text = extra || t('aiScreenshotPrompt');
+    await askOnce(text, [dataUrl]);
+  } catch (e) {
+    setStatus(t('aiScreenshotFailed', { err: errText(e) }));
+  }
+}
+
+/** 发给后端的历史：带上图片字段，让 ai_chat 能把图像传给视觉模型。 */
+function aiHistoryForBackend(): AiMessage[] {
+  return aiHistory.map((m) => ({
+    role: m.role,
+    content: m.content,
+    images: m.images ?? [],
+  }));
+}
+
 async function sendAiMessage(): Promise<void> {
   const input = $<HTMLTextAreaElement>('ai-input');
   const text = input.value.trim();
@@ -2976,16 +3752,33 @@ async function sendAiMessage(): Promise<void> {
   }
 }
 
-/** Ask 模式：问一次，答一次。 */
-async function askOnce(text: string): Promise<void> {
+/** Ask 模式：问一次，答一次。extraImages 非空时把图片随消息带给视觉模型。 */
+async function askOnce(text: string, extraImages?: string[]): Promise<void> {
   const cfg = loadAiConfig();
   const tab = currentTab();
-  const ctx = tab
-    ? readTerminalContext(tab, cfg.context_lines, cfg.context_max_line_len)
-    : '';
+  let ctx = '';
+  if (tab?.browser) {
+    // 浏览器标签：从后端缓存拿页面文本
+    try {
+      ctx = await invoke<string>('browser_read_text', {
+        label: tab.browser.label,
+      });
+    } catch { ctx = ''; }
+    // 截断，避免太长
+    const MAX_BROWSER_CTX_CHARS = cfg.context_lines * cfg.context_max_line_len;
+    if (ctx.length > MAX_BROWSER_CTX_CHARS) {
+      ctx = ctx.slice(ctx.length - MAX_BROWSER_CTX_CHARS);
+    }
+  } else if (tab) {
+    // 终端标签：读 xterm buffer
+    ctx = readTerminalContext(tab, cfg.context_lines, cfg.context_max_line_len);
+  }
+  // 带了截图就不必再叠终端文本上下文，纯文本问询维持原逻辑
+  if (extraImages?.length) ctx = '';
   const userMsg: AiMessage = {
     role: 'user',
     content: ctx ? `[终端最近输出]\n\`\`\`\n${ctx}\n\`\`\`\n\n${text}` : text,
+    images: extraImages,
   };
   pushAiMessage(userMsg, cfg.max_history);
   renderAiMessages();
@@ -2993,7 +3786,7 @@ async function askOnce(text: string): Promise<void> {
   try {
     const reply = await invoke<string>('ai_chat', {
       config: cfg,
-      history: aiHistory.map((m) => ({ role: m.role, content: m.content })),
+      history: aiHistoryForBackend(),
     });
     pushAiMessage({ role: 'assistant', content: reply }, cfg.max_history);
     renderAiMessages();
@@ -3036,7 +3829,7 @@ async function runAgent(goal: string): Promise<void> {
     try {
       reply = await invoke<string>('ai_chat', {
         config: cfg,
-        history: aiHistory.map((m) => ({ role: m.role, content: m.content })),
+        history: aiHistoryForBackend(),
       });
     } catch (e) {
       pushAiMessage(
@@ -3067,6 +3860,17 @@ async function runAgent(goal: string): Promise<void> {
     // 4. 逐条执行，把输出反馈给 AI
     for (const cmd of commands) {
       if (!agentState.running) break;
+
+      // 浏览器标签不支持执行命令：提示一次，跳出整个 for
+      const curTab = currentTab();
+      if (curTab?.browser) {
+        pushAiMessage(
+          { role: 'user', content: `[浏览器标签不支持执行命令]` },
+          cfg.max_history,
+        );
+        renderAiMessages();
+        break;
+      }
 
       const dangerous = await invoke<boolean>('ai_is_dangerous', { cmd });
       const isWrite = await invoke<boolean>('ai_is_write_command', { cmd });
@@ -3222,7 +4026,36 @@ function renderAiMessages(): void {
   for (const m of aiHistory) {
     const div = document.createElement('div');
     div.className = `ai-msg ai-msg-${m.role}`;
-    div.textContent = m.content;
+    // 消息里的截图渲染成可点击放大的缩略图
+    if (m.images?.length) {
+      const imgs = document.createElement('div');
+      imgs.className = 'ai-msg-images';
+      for (const url of m.images) {
+        const thumb = document.createElement('img');
+        thumb.src = url;
+        thumb.className = 'ai-msg-image';
+        thumb.alt = t('aiScreenshotTitle');
+        thumb.onclick = () => {
+          const full = document.createElement('img');
+          full.src = url;
+          full.className = 'ai-screenshot-full';
+          const overlay = document.createElement('div');
+          overlay.className = 'ai-screenshot-overlay';
+          overlay.appendChild(full);
+          overlay.onclick = () => overlay.remove();
+          document.body.appendChild(overlay);
+        };
+        imgs.appendChild(thumb);
+      }
+      div.appendChild(imgs);
+    }
+    // 纯文本部分（可能为空，比如只发了一张图）
+    if (m.content) {
+      const text = document.createElement('div');
+      text.className = 'ai-msg-text';
+      text.textContent = m.content;
+      div.appendChild(text);
+    }
     container.appendChild(div);
   }
   container.scrollTop = container.scrollHeight;
@@ -3298,6 +4131,7 @@ $('ai-clear').onclick = () => {
   $('ai-agent-status').classList.add('hidden');
 };
 $('ai-settings').onclick = openAiConfig;
+$('ai-screenshot').onclick = () => void aiScreenshotAnalyze();
 $('ai-send').onclick = () => void sendAiMessage();
 $<HTMLTextAreaElement>('ai-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -3442,6 +4276,31 @@ void listen<{ scanId: string }>('scan:done', () => {
 window.addEventListener('error', (e) => setStatus(`JS: ${e.message}`));
 window.addEventListener('unhandledrejection', (e) => setStatus(`Promise: ${String(e.reason)}`));
 window.addEventListener('resize', scheduleFit);
+// 主窗口移动时重新定位浏览器
+void getCurrentWindow().onMoved(() => {
+  for (const t of tabs) {
+    if (t.browser) void positionBrowser(t);
+  }
+});
+window.addEventListener('focus', () => {
+  for (const t of tabs) {
+    if (t.browser) void positionBrowser(t);
+  }
+});
+
+/**
+ * 窗口尺寸变化时，重新定位所有浏览器标签的 Webview。
+ * 加 60ms 防抖，避免拖动窗口时高频调用后端。
+ */
+let browserResizeTimer: number | undefined;
+window.addEventListener('resize', () => {
+  window.clearTimeout(browserResizeTimer);
+  browserResizeTimer = window.setTimeout(() => {
+    for (const t of tabs) {
+      if (t.browser) void positionBrowser(t);
+    }
+  }, 60);
+});
 /**
  * native 模式下，窗口缩放时同步 RDP 分辨率。
  * 只对 displayMode === 'native' 的 RDP 会话生效。
@@ -3478,6 +4337,42 @@ $<HTMLInputElement>('sftp-show-hidden').checked = showHiddenFiles;
 // 把本地保存的主机密钥策略同步给后端，默认 accept-new
 void invoke('set_host_key_policy', { policy: hostKeyPolicy }).catch(() => {});
 setupDragDrop();
+// 恢复 AI 面板宽度
+try {
+  const saved = localStorage.getItem('rustterm.aiPanelWidth');
+  if (saved && /^\d+px$/.test(saved)) {
+    document.documentElement.style.setProperty('--ai-panel-width', saved);
+  }
+} catch { /* 忽略 */ }
+
+setupAiPanelResize();
+/**
+ * Webview 是原生窗口，永远浮在 HTML 之上。
+ * 任何 .modal 显示时隐藏所有 Webview；全部关闭后恢复当前活动标签的 Webview。
+ *
+ * 用 MutationObserver 监控所有 .modal 的 class 变化，避免逐个对话框函数去调。
+ */
+const modalObserver = new MutationObserver(() => {
+  const anyVisible = document.querySelector('.modal:not(.hidden)') !== null;
+  if (anyVisible) {
+    for (const t of tabs) {
+      if (t.browser) {
+        void invoke('browser_set_visible', {
+          label: t.browser.label,
+          visible: false,
+        }).catch(() => {});
+      }
+    }
+  } else {
+    const tab = currentTab();
+    if (tab?.browser) void positionBrowser(tab);
+  }
+});
+modalObserver.observe(document.body, {
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['class'],
+});
 showWelcome();
 
 void showSessionManager();
